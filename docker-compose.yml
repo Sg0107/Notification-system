@@ -1,6 +1,8 @@
-version: "3.8"
-
 services:
+  # Kafka needs Zookeeper to coordinate which broker owns which partition.
+  # (Newer Kafka versions support "KRaft mode" without Zookeeper, but the
+  # Zookeeper setup is still the most common thing you'll see in tutorials
+  # and existing production systems, so it's worth knowing.)
   zookeeper:
     image: confluentinc/cp-zookeeper:7.6.1
     environment:
@@ -14,38 +16,38 @@ services:
     depends_on:
       - zookeeper
     ports:
-      - "9092:9092"
+      - "9093:9092"   # host:container -> our Node.js code connects to localhost:9093
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      # KAFKA_LISTENERS: what address/port Kafka actually binds to *inside*
+      # the container. We pin these to fixed, predictable ports.
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      # KAFKA_ADVERTISED_LISTENERS: what address Kafka tells clients to use
+      # for *future* connections. This can legitimately differ from the
+      # bind address above - kafka:29092 for other containers on the
+      # docker network, localhost:9093 for your Mac's terminal/Node app
+      # (9093 because that's the host-side port we mapped below).
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9093
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      # We'll create topics explicitly ourselves later (a script), rather
+      # than letting Kafka auto-create them on first use. Explicit topic
+      # creation lets us control partition count deliberately.
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
 
   redis:
     image: redis:7.2-alpine
     ports:
-      - "6379:6379"
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+      - "6380:6379"   # host:container -> our app connects to localhost:6380
 
   mongo:
     image: mongo:7.0
     ports:
-      - "27017:27017"
+      - "27018:27017"   # host:container -> our app connects to localhost:27018
     volumes:
-      - mongo-data:/data/db
-
-  kafka-ui:
-    image: provectuslabs/kafka-ui:latest
-    depends_on:
-      - kafka
-    ports:
-      - "8080:8080"
-    environment:
-      KAFKA_CLUSTERS_0_NAME: local
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      - mongo-data:/data/db   # keep data between restarts
 
 volumes:
   mongo-data:

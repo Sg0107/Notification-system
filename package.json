@@ -1,36 +1,20 @@
 {
   "name": "distributed-notification-system",
-  "version": "1.0.0",
-  "description": "Asynchronous multi-channel notification system with priority processing, rate limiting, idempotency, exponential backoff, provider failure isolation and dead-letter processing.",
+  "version": "0.1.0",
+  "description": "Learning build of an async multi-channel notification system (Node.js, Kafka, Redis, MongoDB)",
   "main": "src/api/server.js",
   "type": "commonjs",
   "scripts": {
-    "start:api": "node src/api/server.js",
-    "start:worker:email": "node src/workers/emailWorker.js",
-    "start:worker:sms": "node src/workers/smsWorker.js",
-    "start:worker:push": "node src/workers/pushWorker.js",
-    "start:worker:dlq": "node src/workers/dlqWorker.js",
-    "start:worker:retry": "node src/workers/retryScheduler.js",
     "setup:topics": "node scripts/createTopics.js",
-    "dev": "concurrently -n API,EMAIL,SMS,PUSH,DLQ,RETRY -c blue,green,yellow,magenta,red,cyan \"npm:start:api\" \"npm:start:worker:email\" \"npm:start:worker:sms\" \"npm:start:worker:push\" \"npm:start:worker:dlq\" \"npm:start:worker:retry\"",
-    "test": "jest --runInBand"
+    "test": "echo \"no tests yet\" && exit 0"
   },
   "dependencies": {
-    "kafkajs": "^2.2.4",
-    "ioredis": "^5.4.1",
-    "mongoose": "^8.6.0",
-    "express": "^4.19.2",
     "dotenv": "^16.4.5",
-    "uuid": "^9.0.1",
-    "joi": "^17.13.3",
-    "winston": "^3.13.1",
-    "helmet": "^7.1.0"
+    "express": "^4.19.2",
+    "ioredis": "^5.4.1",
+    "kafkajs": "^2.2.4"
   },
-  "devDependencies": {
-    "jest": "^29.7.0",
-    "nodemon": "^3.1.4",
-    "concurrently": "^8.2.2"
-  },
+  "devDependencies": {},
   "engines": {
     "node": ">=18"
   }
