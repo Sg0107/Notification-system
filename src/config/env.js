@@ -23,4 +23,14 @@ module.exports = {
     sms: Number(process.env.SMS_PROVIDER_FAILURE_RATE) || 0.15,
     push: Number(process.env.PUSH_PROVIDER_FAILURE_RATE) || 0.05,
   },
+  retry: {
+    maxRetries: Number(process.env.MAX_RETRIES) || 5,
+    baseDelayMs: Number(process.env.RETRY_BASE_DELAY_MS) || 1000,
+    maxDelayMs: Number(process.env.RETRY_MAX_DELAY_MS) || 30000,
+    // Rate-limited (not failed) messages retry quickly on a short fixed
+    // delay - being over budget isn't a real failure, it doesn't count
+    // against maxRetries, and it should resolve itself within a second
+    // or two once the token bucket refills.
+    rateLimitRetryDelayMs: Number(process.env.RATE_LIMIT_RETRY_DELAY_MS) || 250,
+  },
 };

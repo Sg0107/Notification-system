@@ -11,7 +11,7 @@
  * Run with: node scripts/createTopics.js
  */
 const { kafkaClient } = require('../src/kafka/client');
-const { channels, priorities, topicsFor } = require('../src/kafka/topics');
+const { channels, priorities, topicsFor, retryTopicFor } = require('../src/kafka/topics');
 
 async function main() {
   const admin = kafkaClient.admin();
@@ -24,6 +24,7 @@ async function main() {
     for (const priority of Object.values(priorities)) {
       desiredTopics.push(topicsFor(channel, priority));
     }
+    desiredTopics.push(retryTopicFor(channel));
   }
 
   const topicsToCreate = desiredTopics

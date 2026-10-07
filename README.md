@@ -39,7 +39,8 @@ flowchart LR
     W2 -. circuit breaker, not built yet .-> P2[SMS Provider mock]
     W3 -. circuit breaker, not built yet .-> P3[Push Provider mock]
 
-    W1 -. on failure .-> Retry[notifications.*.retry]
+    W1 -->|on failure/rate-limit| Retry[notifications.*.retry]
+    Retry -->|deliverAt elapsed| T1
     Retry -. exhausted .-> DLQ[notifications.*.dlq]
 ```
 
@@ -55,7 +56,7 @@ Solid lines/boxes = built and verified. Dashed lines/boxes = designed, not yet i
 | 2 | Idempotency (claim-before-publish, release-on-failure) | ✅ Done |
 | 3 | Rate limiting (token bucket, atomic via Redis Lua script) | ✅ Done |
 | 4 | Delivery workers (email/SMS/push consumers) | ✅ Done |
-| 5 | Retry with exponential backoff | ⬜ Not started |
+| 5 | Retry with exponential backoff | ✅ Done |
 | 6 | Circuit breaker for provider failure isolation | ⬜ Not started |
 | 7 | Dead-letter queue handling | ⬜ Not started |
 | 8 | MongoDB persistence (durable notification status) | ⬜ Not started |
@@ -72,7 +73,10 @@ Solid lines/boxes = built and verified. Dashed lines/boxes = designed, not yet i
 - `src/kafka/consumer.js`, `src/workers/baseWorker.js` — generic Kafka consumer wrapper + per-channel worker factory. Each channel runs **three** separate consumers (one per priority), each its own consumer group, each with a different `partitionsConsumedConcurrently` (high=3, normal=2, low=1) - real priority-based concurrency, not just a field on the message.
 - `src/providers/{email,sms,push}Provider.js` — mock providers simulating network latency and a configurable random failure rate, so later steps have real failures to react to. Swappable for real Twilio/SendGrid/FCM calls later without touching worker code.
 - `src/workers/{email,sms,push}Worker.js` — entrypoints, run via `npm run start:worker:<channel>`.
-- **Known gap, by design, to be fixed in Step 5:** right now a rate-limited or failed send is just logged and dropped - nothing retries it yet.
+- `src/utils/backoff.js` — `computeBackoffMs(attempt, baseDelay, maxDelay)`: full-jitter exponential backoff, `random(0, min(baseDelay * 2^attempt, maxDelay))`.
+- `src/kafka/topics.js` — `retryTopicFor(channel)`, one retry topic per channel (`notifications.<channel>.retry`), created alongside the priority topics in `scripts/createTopics.js`.
+- `src/workers/baseWorker.js` — now also a Kafka *producer* (calls `connectProducer()` at startup), and runs a fourth consumer per channel against that channel's retry topic. On a rate-limited send, republishes to the retry topic with a short fixed delay (doesn't count against `maxRetries` - being over budget isn't a real failure). On a genuinely failed send, computes the next backoff via `computeBackoffMs` and republishes with an incremented `attempt` and a `deliverAt` timestamp. The retry-topic consumer holds each message until `deliverAt`, then republishes it onto its *original* priority topic, so it re-enters the normal flow exactly like a fresh message. After `maxRetries` attempts, the worker currently just logs "giving up" - becomes the dead-letter queue in Step 7.
+- **Known gap, by design, to be fixed in Step 7:** a notification that exhausts all retries is just logged and dropped - nothing routes it anywhere inspectable yet.
 
 ## Key design decisions made so far (and why)
 
@@ -80,6 +84,9 @@ Solid lines/boxes = built and verified. Dashed lines/boxes = designed, not yet i
 - **Idempotency uses one atomic Redis `SET NX` call**, not a separate `GET` then `SET` — two round trips re-open a race condition where two concurrent duplicate requests could both see "not claimed yet" before either writes.
 - **Claim the idempotency key *before* publishing, with an explicit rollback if publishing fails** (rather than claiming after success) — this closes the window where two concurrent duplicate requests could both slip through, at the cost of needing explicit cleanup on failure. See the idempotency section of our build log for the full tradeoff discussion.
 - **Rate limiting's token-bucket math runs inside a Redis Lua script (`EVAL`), not as separate JS-side `GET`/`SET` calls** — same reasoning as idempotency: two round trips re-open a race condition (proven empirically: a non-atomic first draft let all 20 of 20 concurrent requests through against a bucket of capacity 5). The Lua script also asks Redis for the current time via `TIME` rather than using each caller's own clock, so results stay consistent across multiple worker processes/machines.
+- **Retries go through a dedicated per-channel Kafka topic (`notifications.<channel>.retry`) + a scheduler consumer, not an in-process `setTimeout`** — Kafka has no native delayed-delivery, and an in-process timer would lose all pending retries if the worker restarted, and couldn't scale across multiple worker instances. Holding the message on a separate topic until its `deliverAt` time, then republishing onto the original priority topic, survives restarts and keeps retry traffic from clogging the primary topics/partitions.
+- **Full-jitter exponential backoff (`random(0, min(base * 2^attempt, max))`), not fixed or deterministic exponential delay** — without randomness, every failed message retries on the exact same schedule, so a provider outage causes a "thundering herd" where all delayed retries slam the provider again at the same instant. Jitter spreads retries out.
+- **Rate-limited sends retry on a short fixed delay and don't count against `maxRetries`**, separately from genuine send failures — being over budget is expected, self-correcting behavior (the bucket refills in under a second), not a sign of a broken provider, so it shouldn't eat into the same retry budget as actual failures.
 
 ## Running it locally
 
@@ -103,4 +110,4 @@ Send the exact same request again and you should get `409 duplicate notification
 
 ## Next up
 
-Retry with exponential backoff (so a failed or rate-limited send gets re-queued instead of dropped), then circuit breakers and dead-letter handling.
+Circuit breakers for provider failure isolation, then dead-letter queue handling for notifications that exhaust all retries.
