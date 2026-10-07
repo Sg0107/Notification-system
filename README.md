@@ -53,7 +53,7 @@ Solid lines/boxes = built and verified. Dashed lines/boxes = designed, not yet i
 | 1 | Priority modeling (separate topic per channel × priority) | ✅ Done |
 | 2 | Ingestion API (`POST /api/notifications`) | ✅ Done |
 | 2 | Idempotency (claim-before-publish, release-on-failure) | ✅ Done |
-| 3 | Rate limiting (token bucket, per channel) | 🚧 Designed, not coded yet |
+| 3 | Rate limiting (token bucket, atomic via Redis Lua script) | ✅ Done |
 | 4 | Delivery workers (email/SMS/push consumers) | ⬜ Not started |
 | 5 | Retry with exponential backoff | ⬜ Not started |
 | 6 | Circuit breaker for provider failure isolation | ⬜ Not started |
@@ -68,12 +68,14 @@ Solid lines/boxes = built and verified. Dashed lines/boxes = designed, not yet i
 - `src/config/env.js`, `src/config/redis.js` — centralized env config, shared Redis client.
 - `src/services/idempotency.js` — `buildIdempotencyKey` (caller-supplied key or a derived SHA-256 hash of channel+recipient+payload), `claimIdempotencyKey` (atomic Redis `SET ... NX EX`), `releaseIdempotencyKey` (rollback on publish failure).
 - `src/api/routes/notifications.js`, `src/api/server.js` — `POST /api/notifications` validates input, claims the idempotency key, publishes to the right topic, rolls back the claim if publishing fails. Returns `202` (queued), `400` (bad input), `409` (duplicate), or `500`.
+- `src/services/rateLimiter.js` — `tryConsume(channel)`, a token bucket rate limiter per channel. The refill math (elapsed time × rate, capped at capacity) runs entirely inside a Redis Lua script via `EVAL`, so the whole "read bucket state, compute refill, decide, write back" sequence is one atomic operation - verified by `scripts/testRateLimiterRace.js`, which fires 20 concurrent requests at a bucket with capacity 5 and confirms exactly 5 get through.
 
 ## Key design decisions made so far (and why)
 
 - **Separate Kafka topics per priority**, not a single topic with a priority field — Kafka only guarantees order within a partition by write order, so a priority field on a shared topic can't actually jump the queue without extra machinery. Separate topics + separate consumers per priority gives real prioritization.
 - **Idempotency uses one atomic Redis `SET NX` call**, not a separate `GET` then `SET` — two round trips re-open a race condition where two concurrent duplicate requests could both see "not claimed yet" before either writes.
 - **Claim the idempotency key *before* publishing, with an explicit rollback if publishing fails** (rather than claiming after success) — this closes the window where two concurrent duplicate requests could both slip through, at the cost of needing explicit cleanup on failure. See the idempotency section of our build log for the full tradeoff discussion.
+- **Rate limiting's token-bucket math runs inside a Redis Lua script (`EVAL`), not as separate JS-side `GET`/`SET` calls** — same reasoning as idempotency: two round trips re-open a race condition (proven empirically: a non-atomic first draft let all 20 of 20 concurrent requests through against a bucket of capacity 5). The Lua script also asks Redis for the current time via `TIME` rather than using each caller's own clock, so results stay consistent across multiple worker processes/machines.
 
 ## Running it locally
 
@@ -97,4 +99,4 @@ Send the exact same request again and you should get `409 duplicate notification
 
 ## Next up
 
-Rate limiting (token bucket, atomic via a Redis Lua script) — then delivery workers, retry/backoff, circuit breakers, and dead-letter handling, in that order.
+Delivery workers (email/SMS/push consumers), then retry/backoff, circuit breakers, and dead-letter handling, in that order.
