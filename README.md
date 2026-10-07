@@ -27,17 +27,17 @@ flowchart LR
     Kafka --> T2
     Kafka --> T3
 
-    T1 -. not built yet .-> W1[Email Worker]
-    T2 -. not built yet .-> W2[SMS Worker]
-    T3 -. not built yet .-> W3[Push Worker]
+    T1 --> W1[Email Worker]
+    T2 --> W2[SMS Worker]
+    T3 --> W3[Push Worker]
 
-    W1 -. rate limit check .-> RL[(Redis:\nrate limiter)]
-    W2 -. rate limit check .-> RL
-    W3 -. rate limit check .-> RL
+    W1 -->|rate limit check| RL[(Redis:\nrate limiter)]
+    W2 -->|rate limit check| RL
+    W3 -->|rate limit check| RL
 
-    W1 -. circuit breaker .-> P1[Email Provider]
-    W2 -. circuit breaker .-> P2[SMS Provider]
-    W3 -. circuit breaker .-> P3[Push Provider]
+    W1 -. circuit breaker, not built yet .-> P1[Email Provider mock]
+    W2 -. circuit breaker, not built yet .-> P2[SMS Provider mock]
+    W3 -. circuit breaker, not built yet .-> P3[Push Provider mock]
 
     W1 -. on failure .-> Retry[notifications.*.retry]
     Retry -. exhausted .-> DLQ[notifications.*.dlq]
@@ -54,7 +54,7 @@ Solid lines/boxes = built and verified. Dashed lines/boxes = designed, not yet i
 | 2 | Ingestion API (`POST /api/notifications`) | ✅ Done |
 | 2 | Idempotency (claim-before-publish, release-on-failure) | ✅ Done |
 | 3 | Rate limiting (token bucket, atomic via Redis Lua script) | ✅ Done |
-| 4 | Delivery workers (email/SMS/push consumers) | ⬜ Not started |
+| 4 | Delivery workers (email/SMS/push consumers) | ✅ Done |
 | 5 | Retry with exponential backoff | ⬜ Not started |
 | 6 | Circuit breaker for provider failure isolation | ⬜ Not started |
 | 7 | Dead-letter queue handling | ⬜ Not started |
@@ -69,6 +69,10 @@ Solid lines/boxes = built and verified. Dashed lines/boxes = designed, not yet i
 - `src/services/idempotency.js` — `buildIdempotencyKey` (caller-supplied key or a derived SHA-256 hash of channel+recipient+payload), `claimIdempotencyKey` (atomic Redis `SET ... NX EX`), `releaseIdempotencyKey` (rollback on publish failure).
 - `src/api/routes/notifications.js`, `src/api/server.js` — `POST /api/notifications` validates input, claims the idempotency key, publishes to the right topic, rolls back the claim if publishing fails. Returns `202` (queued), `400` (bad input), `409` (duplicate), or `500`.
 - `src/services/rateLimiter.js` — `tryConsume(channel)`, a token bucket rate limiter per channel. The refill math (elapsed time × rate, capped at capacity) runs entirely inside a Redis Lua script via `EVAL`, so the whole "read bucket state, compute refill, decide, write back" sequence is one atomic operation - verified by `scripts/testRateLimiterRace.js`, which fires 20 concurrent requests at a bucket with capacity 5 and confirms exactly 5 get through.
+- `src/kafka/consumer.js`, `src/workers/baseWorker.js` — generic Kafka consumer wrapper + per-channel worker factory. Each channel runs **three** separate consumers (one per priority), each its own consumer group, each with a different `partitionsConsumedConcurrently` (high=3, normal=2, low=1) - real priority-based concurrency, not just a field on the message.
+- `src/providers/{email,sms,push}Provider.js` — mock providers simulating network latency and a configurable random failure rate, so later steps have real failures to react to. Swappable for real Twilio/SendGrid/FCM calls later without touching worker code.
+- `src/workers/{email,sms,push}Worker.js` — entrypoints, run via `npm run start:worker:<channel>`.
+- **Known gap, by design, to be fixed in Step 5:** right now a rate-limited or failed send is just logged and dropped - nothing retries it yet.
 
 ## Key design decisions made so far (and why)
 
@@ -99,4 +103,4 @@ Send the exact same request again and you should get `409 duplicate notification
 
 ## Next up
 
-Delivery workers (email/SMS/push consumers), then retry/backoff, circuit breakers, and dead-letter handling, in that order.
+Retry with exponential backoff (so a failed or rate-limited send gets re-queued instead of dropped), then circuit breakers and dead-letter handling.

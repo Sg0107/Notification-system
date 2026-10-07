@@ -6,6 +6,10 @@
   "type": "commonjs",
   "scripts": {
     "setup:topics": "node scripts/createTopics.js",
+    "start:api": "node src/api/server.js",
+    "start:worker:email": "node src/workers/emailWorker.js",
+    "start:worker:sms": "node src/workers/smsWorker.js",
+    "start:worker:push": "node src/workers/pushWorker.js",
     "test": "echo \"no tests yet\" && exit 0"
   },
   "dependencies": {

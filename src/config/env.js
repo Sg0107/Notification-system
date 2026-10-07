@@ -16,4 +16,11 @@ module.exports = {
     sms: Number(process.env.RATE_LIMIT_SMS_PER_SEC) || 5,
     push: Number(process.env.RATE_LIMIT_PUSH_PER_SEC) || 20,
   },
+  // Mock providers randomly fail at this rate (0-1) so the retry/circuit
+  // breaker logic we build in later steps has something real to react to.
+  providerFailureRates: {
+    email: Number(process.env.EMAIL_PROVIDER_FAILURE_RATE) || 0.1,
+    sms: Number(process.env.SMS_PROVIDER_FAILURE_RATE) || 0.15,
+    push: Number(process.env.PUSH_PROVIDER_FAILURE_RATE) || 0.05,
+  },
 };
