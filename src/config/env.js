@@ -6,6 +6,7 @@ module.exports = {
     clientId: process.env.KAFKA_CLIENT_ID || 'notification-system',
   },
   redisUrl: process.env.REDIS_URL || 'redis://localhost:6380',
+  mongoUri: process.env.MONGO_URI || 'mongodb://localhost:27018/notifications',
   idempotencyTtlSeconds: Number(process.env.IDEMPOTENCY_TTL_SECONDS) || 86400, // 24h default
   // Token bucket capacity/refill rate per channel, in requests per second.
   // Deliberately low defaults for push since that's usually the

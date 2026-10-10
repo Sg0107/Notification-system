@@ -1,5 +1,7 @@
 const express = require('express');
 const { connectProducer } = require('../kafka/producer');
+const { connectMongo } = require('../config/mongo');
+const { ensureIndexes } = require('../dao/notificationDao');
 const notificationsRouter = require('./routes/notifications');
 
 const app = express();
@@ -13,6 +15,11 @@ async function start() {
   // unreachable, we want the whole process to fail loudly at startup,
   // rather than accepting requests we can't actually fulfil.
   await connectProducer();
+
+  // Same reasoning for Mongo - fail loudly at startup if it's unreachable,
+  // rather than discovering it mid-request.
+  await connectMongo();
+  await ensureIndexes();
 
   const port = 3000;
   app.listen(port, () => {

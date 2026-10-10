@@ -4,7 +4,21 @@ const { topicsFor, retryTopicFor, dlqTopicFor, priorities } = require('../kafka/
 const { tryConsume } = require('../services/rateLimiter');
 const { computeBackoffMs } = require('../utils/backoff');
 const { callWithBreaker, CircuitOpenError } = require('../services/circuitBreaker');
+const { connectMongo } = require('../config/mongo');
+const { ensureIndexes, markSent, markAttemptFailed, markDeadLettered } = require('../dao/notificationDao');
 const { retry: retryConfig, circuitBreaker: circuitBreakerConfig } = require('../config/env');
+
+// Every Mongo write from the worker is best-effort: Kafka is the source of
+// truth for whether a notification gets delivered, so a Mongo hiccup should
+// never crash message processing or block a retry/DLQ decision - it should
+// just fail to update the dashboard's view, silently-ish (logged, not thrown).
+async function recordSafely(fn, label) {
+  try {
+    await fn();
+  } catch (err) {
+    console.error(`Failed to update MongoDB (${label}, non-fatal):`, err.message);
+  }
+}
 
 // Higher priority = more concurrent partition processing, so a backlog of
 // low-priority work can never delay high-priority work from being picked
@@ -36,6 +50,12 @@ async function startWorker({ channel, sendFn }) {
   // less robust and was the actual cause of the "producer is disconnected"
   // crash we hit while testing.
   await connectProducer();
+
+  // Same "fail loudly at startup, not mid-message" reasoning as the API
+  // server - and ensureIndexes() is safe to call from every process, since
+  // creating an index that already exists is a no-op.
+  await connectMongo();
+  await ensureIndexes();
 
   // One breaker per channel, created once and shared across every message
   // this worker handles (not a fresh breaker per message) - its whole job
@@ -92,7 +112,7 @@ async function startWorker({ channel, sendFn }) {
 // from the logs whether we actually hit the provider or short-circuited.
 function makeHandler(channel, send) {
   return async function handleNotification(notification) {
-    const { recipient, payload, priority, attempt = 0 } = notification;
+    const { recipient, payload, priority, attempt = 0, idempotencyKey } = notification;
 
     const allowed = await tryConsume(channel);
     if (!allowed) {
@@ -114,6 +134,12 @@ function makeHandler(channel, send) {
         provider: result.provider,
         messageId: result.messageId,
       });
+      if (idempotencyKey) {
+        await recordSafely(
+          () => markSent(idempotencyKey, { provider: result.provider, messageId: result.messageId }),
+          'markSent'
+        );
+      }
     } catch (err) {
       const nextAttempt = attempt + 1;
       const reason = err instanceof CircuitOpenError ? 'circuit open' : 'send FAILED';
@@ -134,6 +160,12 @@ function makeHandler(channel, send) {
           finalError: err.message,
           deadLetteredAt: Date.now(),
         });
+        if (idempotencyKey) {
+          await recordSafely(
+            () => markDeadLettered(idempotencyKey, { attempts: nextAttempt, finalError: err.message }),
+            'markDeadLettered'
+          );
+        }
         return;
       }
 
@@ -148,6 +180,12 @@ function makeHandler(channel, send) {
         attempt: nextAttempt,
         deliverAt: Date.now() + backoffMs,
       });
+      if (idempotencyKey) {
+        await recordSafely(
+          () => markAttemptFailed(idempotencyKey, { attempt: nextAttempt, error: err.message }),
+          'markAttemptFailed'
+        );
+      }
     }
   };
 }

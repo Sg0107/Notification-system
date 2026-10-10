@@ -31,6 +31,11 @@ flowchart LR
     T2 --> W2[SMS Worker]
     T3 --> W3[Push Worker]
 
+    API -->|insert queued doc| Mongo[(MongoDB:\nnotifications)]
+    W1 -->|update status| Mongo
+    W2 -->|update status| Mongo
+    W3 -->|update status| Mongo
+
     W1 -->|rate limit check| RL[(Redis:\nrate limiter)]
     W2 -->|rate limit check| RL
     W3 -->|rate limit check| RL
@@ -59,7 +64,7 @@ Solid lines/boxes = built and verified. Dashed lines/boxes = designed, not yet i
 | 5 | Retry with exponential backoff | ✅ Done |
 | 6 | Circuit breaker for provider failure isolation | ✅ Done |
 | 7 | Dead-letter queue handling | ✅ Done |
-| 8 | MongoDB persistence (durable notification status) | ⬜ Not started |
+| 8 | MongoDB persistence (durable notification status) | ✅ Done |
 
 ## What's actually implemented right now
 
@@ -82,6 +87,10 @@ Solid lines/boxes = built and verified. Dashed lines/boxes = designed, not yet i
 - `src/workers/baseWorker.js` — once a notification exhausts `maxRetries`, instead of just logging and dropping it, it's published to the channel's DLQ topic with the original notification body plus `attempts` (how many sends were actually tried), `finalError`, and `deadLetteredAt`, so it's debuggable later without cross-referencing logs.
 - `scripts/viewDlq.js` (`npm run dlq:view -- <channel>`) — a one-shot inspector that reads everything currently sitting in a channel's DLQ from the beginning and prints it, then exits after a few seconds of no new messages. Deliberately not a long-running consumer or an auto-processor (no alerting, no "retry from DLQ" admin action yet) - the DLQ today is purely "a place exhausted notifications are visible," checked on demand.
 - **Known gap, by design:** nothing automatically alerts on new DLQ messages, and there's no way to manually retry a dead-lettered notification yet - both reasonable future extensions, intentionally not built now.
+- `src/config/mongo.js` — shared MongoDB client, same `connect once, reuse everywhere` pattern as `kafka/client.js`/`config/redis.js`. `connectMongo()` at process startup, `getDb()` everywhere else (throws if called before connecting, so a forgotten connect step fails loudly at the exact wrong call site instead of silently).
+- `src/dao/notificationDao.js` — every raw Mongo query lives here, and nowhere else; callers describe *what* happened ("this was sent," "this attempt failed") without knowing *how* it's stored. `createQueuedNotification` (called from the API right after a successful Kafka publish), `markAttemptFailed`/`markSent`/`markDeadLettered` (called from the worker at the matching points in `baseWorker.js`). `ensureIndexes()` sets up a unique index on `idempotencyKey` (the correlation key between the API's insert and the worker's later updates) plus a compound `{channel, status, createdAt}` index shaped for the dashboard queries this is ultimately for ("how many emails failed today," "status breakdown per channel over time").
+- `src/api/routes/notifications.js` — now includes `idempotencyKey` in the published Kafka message body (it didn't before - the worker needs it to find the right Mongo document later), and writes the `queued` document right after a successful publish. This write is best-effort: Kafka is already the source of truth for delivery once published, so a Mongo failure here is logged, not thrown - it shouldn't turn an actually-queued notification into a failed API response.
+- `src/workers/baseWorker.js` — same best-effort treatment on the worker side (a `recordSafely` wrapper logs and swallows Mongo errors rather than crashing message processing): `markSent` on success, `markAttemptFailed` on each retry (keeps `attempts`/`lastError` current on the one document, rather than one row per attempt), `markDeadLettered` when a notification is sent to the DLQ. Verified end-to-end: sent 3 notifications, one failed once before succeeding (document shows `attempts: 1` with the transient error preserved, `status: 'sent'`), two succeeded on the first try (`attempts: 0`).
 
 ## Key design decisions made so far (and why)
 
@@ -96,6 +105,9 @@ Solid lines/boxes = built and verified. Dashed lines/boxes = designed, not yet i
 - **Breaker state lives in-process memory, per worker process, not in Redis** — this worker only ever runs as a single process today, so there's nothing to share. If we ever ran multiple worker instances per channel, each would have its own independent breaker and could disagree about whether the provider is healthy; sharing state via Redis would fix that, at the cost of a round trip per call. Flagged as a known limitation of the current single-instance design, not solved yet.
 - **A breaker rejection throws, rather than returning an error value** — so it flows through the exact same `try/catch` in `makeHandler` that already handles genuine provider failures, with zero changes needed to the retry/backoff logic. The log line is the only place the two cases are told apart.
 - **The DLQ is written to, but nothing consumes it automatically** — a dedicated topic per channel keeps dead-lettered notifications durable and inspectable (survives worker restarts, unlike an in-memory list), without us having to build alerting or an admin UI yet. `scripts/viewDlq.js` is a manual, on-demand way to check it; automatic alerting or a retry-from-DLQ action are natural next steps, not built now.
+- **Mongo access goes through a DAO (`src/dao/`), not ad-hoc queries scattered in the route and worker** — the API route and `baseWorker.js` call named functions (`createQueuedNotification`, `markSent`, ...) that describe intent, not raw `collection.updateOne(...)` calls with field names repeated at every call site. This matters specifically because the plan is a future analytics dashboard: when that's built, it can read through the same DAO (or a sibling read-side module), and if the schema or indexing strategy ever changes, there's exactly one file to update, not three.
+- **Every Mongo write is best-effort (logged on failure, never thrown)**, both from the API and the worker — Kafka is the actual source of truth for whether a notification gets delivered; Mongo is a side-channel for visibility and analytics. A Mongo outage should degrade "the dashboard is a bit stale," not break notification delivery or turn a successfully-queued request into a 500.
+- **One row per notification, updated in place, not one row per attempt** — a `retrying` status update overwrites the same document's `attempts`/`lastError` fields rather than inserting a new document per attempt. Keeps the collection's size proportional to notification volume, not retry volume, and makes "what's the current status of X" a single document lookup instead of "find the latest row for X."
 
 ## Running it locally
 
@@ -119,4 +131,4 @@ Send the exact same request again and you should get `409 duplicate notification
 
 ## Next up
 
-MongoDB persistence - durable notification status (queued/sent/failed/dead-lettered), queryable independent of what's currently sitting in Kafka.
+A final end-to-end pass: run the full system together (API + all three workers), confirm every piece still works in concert, and compare this build against the original v1 version now that every piece has actually been understood, not just generated. Beyond that, the natural follow-ups for the analytics dashboard idea are a read-side API over the `notifications` collection and, eventually, the productization phase (multi-tenant, configurable, sellable) that was explicitly deferred at the start of this rebuild.

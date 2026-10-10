@@ -7,6 +7,7 @@ const {
   claimIdempotencyKey,
   releaseIdempotencyKey,
 } = require('../../services/idempotency');
+const { createQueuedNotification } = require('../../dao/notificationDao');
 
 router.post('/', async (req, res) => {
   const { channel, priority = 'normal', recipient, payload, idempotencyKey } = req.body;
@@ -45,10 +46,29 @@ router.post('/', async (req, res) => {
     // retry with the same idempotency key isn't wrongly blocked for the
     // rest of the TTL window.
     try {
-      await publish(topic, { channel, priority, recipient, payload });
+      // idempotencyKey now rides along in the message body - the worker
+      // needs it to find this same notification's Mongo document later
+      // and update it (markSent/markAttemptFailed/markDeadLettered).
+      await publish(topic, { channel, priority, recipient, payload, idempotencyKey: builtIdempotencyKey });
     } catch (publishError) {
       await releaseIdempotencyKey(builtIdempotencyKey);
       throw publishError;
+    }
+
+    // Best-effort: record this notification for the dashboard. Kafka is
+    // already the source of truth for delivery at this point (the message
+    // is published), so a Mongo hiccup here shouldn't fail a request that
+    // has, in fact, been successfully queued.
+    try {
+      await createQueuedNotification({
+        idempotencyKey: builtIdempotencyKey,
+        channel,
+        priority,
+        recipient,
+        payload,
+      });
+    } catch (storeError) {
+      console.error('Failed to record notification in MongoDB (non-fatal):', storeError.message);
     }
 
     res.status(202).json({
