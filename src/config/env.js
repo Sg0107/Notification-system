@@ -33,4 +33,11 @@ module.exports = {
     // or two once the token bucket refills.
     rateLimitRetryDelayMs: Number(process.env.RATE_LIMIT_RETRY_DELAY_MS) || 250,
   },
+  circuitBreaker: {
+    // Consecutive failures before the breaker trips from closed -> open.
+    failureThreshold: Number(process.env.CIRCUIT_BREAKER_THRESHOLD) || 5,
+    // How long the breaker stays open before allowing one half-open trial
+    // call through, in ms.
+    breakTimeoutMs: Number(process.env.CIRCUIT_BREAKER_TIMEOUT_MS) || 5000,
+  },
 };

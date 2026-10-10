@@ -3,7 +3,8 @@ const { connectProducer, publish } = require('../kafka/producer');
 const { topicsFor, retryTopicFor, priorities } = require('../kafka/topics');
 const { tryConsume } = require('../services/rateLimiter');
 const { computeBackoffMs } = require('../utils/backoff');
-const { retry: retryConfig } = require('../config/env');
+const { callWithBreaker, CircuitOpenError } = require('../services/circuitBreaker');
+const { retry: retryConfig, circuitBreaker: circuitBreakerConfig } = require('../config/env');
 
 // Higher priority = more concurrent partition processing, so a backlog of
 // low-priority work can never delay high-priority work from being picked
@@ -36,6 +37,13 @@ async function startWorker({ channel, sendFn }) {
   // crash we hit while testing.
   await connectProducer();
 
+  // One breaker per channel, created once and shared across every message
+  // this worker handles (not a fresh breaker per message) - its whole job
+  // is to remember failure history across calls, so it has to be the same
+  // instance every time.
+  const guardedSend = callWithBreaker(channel, sendFn, circuitBreakerConfig);
+  const handleNotification = makeHandler(channel, guardedSend);
+
   const consumers = [];
 
   for (const priority of Object.values(priorities)) {
@@ -46,7 +54,7 @@ async function startWorker({ channel, sendFn }) {
       groupId,
       topic,
       concurrency: CONCURRENCY_BY_PRIORITY[priority],
-      onMessage: async (notification) => makeHandler(channel, sendFn)(notification),
+      onMessage: handleNotification,
     });
 
     consumers.push(consumer);
@@ -77,7 +85,12 @@ async function startWorker({ channel, sendFn }) {
   return consumers;
 }
 
-function makeHandler(channel, sendFn) {
+// `send` is already wrapped with the circuit breaker (see startWorker) -
+// from here, a breaker rejection and a genuine provider failure both just
+// arrive as a thrown error, so the retry/backoff path below treats them
+// identically. We only distinguish them in the log line, so it's obvious
+// from the logs whether we actually hit the provider or short-circuited.
+function makeHandler(channel, send) {
   return async function handleNotification(notification) {
     const { recipient, payload, priority, attempt = 0 } = notification;
 
@@ -95,7 +108,7 @@ function makeHandler(channel, sendFn) {
     }
 
     try {
-      const result = await sendFn({ recipient, payload });
+      const result = await send({ recipient, payload });
       console.log(`[${channel}] sent OK (priority=${priority}, attempt=${attempt})`, {
         recipient,
         provider: result.provider,
@@ -103,13 +116,14 @@ function makeHandler(channel, sendFn) {
       });
     } catch (err) {
       const nextAttempt = attempt + 1;
+      const reason = err instanceof CircuitOpenError ? 'circuit open' : 'send FAILED';
 
       if (nextAttempt >= retryConfig.maxRetries) {
         // TEMPORARY for this step: just log "giving up". Step 7 (dead-
         // letter queue) replaces this with actually recording and
         // routing the exhausted notification somewhere inspectable.
         console.error(
-          `[${channel}] send FAILED, max retries (${retryConfig.maxRetries}) exhausted - giving up (priority=${priority})`,
+          `[${channel}] ${reason}, max retries (${retryConfig.maxRetries}) exhausted - giving up (priority=${priority})`,
           { recipient, error: err.message }
         );
         return;
@@ -117,7 +131,7 @@ function makeHandler(channel, sendFn) {
 
       const backoffMs = computeBackoffMs(nextAttempt, retryConfig.baseDelayMs, retryConfig.maxDelayMs);
       console.error(
-        `[${channel}] send FAILED, scheduling retry ${nextAttempt}/${retryConfig.maxRetries} in ${backoffMs}ms (priority=${priority})`,
+        `[${channel}] ${reason}, scheduling retry ${nextAttempt}/${retryConfig.maxRetries} in ${backoffMs}ms (priority=${priority})`,
         { recipient, error: err.message }
       );
 

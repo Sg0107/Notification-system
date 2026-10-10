@@ -35,9 +35,9 @@ flowchart LR
     W2 -->|rate limit check| RL
     W3 -->|rate limit check| RL
 
-    W1 -. circuit breaker, not built yet .-> P1[Email Provider mock]
-    W2 -. circuit breaker, not built yet .-> P2[SMS Provider mock]
-    W3 -. circuit breaker, not built yet .-> P3[Push Provider mock]
+    W1 -->|circuit breaker| P1[Email Provider mock]
+    W2 -->|circuit breaker| P2[SMS Provider mock]
+    W3 -->|circuit breaker| P3[Push Provider mock]
 
     W1 -->|on failure/rate-limit| Retry[notifications.*.retry]
     Retry -->|deliverAt elapsed| T1
@@ -57,7 +57,7 @@ Solid lines/boxes = built and verified. Dashed lines/boxes = designed, not yet i
 | 3 | Rate limiting (token bucket, atomic via Redis Lua script) | ✅ Done |
 | 4 | Delivery workers (email/SMS/push consumers) | ✅ Done |
 | 5 | Retry with exponential backoff | ✅ Done |
-| 6 | Circuit breaker for provider failure isolation | ⬜ Not started |
+| 6 | Circuit breaker for provider failure isolation | ✅ Done |
 | 7 | Dead-letter queue handling | ⬜ Not started |
 | 8 | MongoDB persistence (durable notification status) | ⬜ Not started |
 
@@ -76,6 +76,8 @@ Solid lines/boxes = built and verified. Dashed lines/boxes = designed, not yet i
 - `src/utils/backoff.js` — `computeBackoffMs(attempt, baseDelay, maxDelay)`: full-jitter exponential backoff, `random(0, min(baseDelay * 2^attempt, maxDelay))`.
 - `src/kafka/topics.js` — `retryTopicFor(channel)`, one retry topic per channel (`notifications.<channel>.retry`), created alongside the priority topics in `scripts/createTopics.js`.
 - `src/workers/baseWorker.js` — now also a Kafka *producer* (calls `connectProducer()` at startup), and runs a fourth consumer per channel against that channel's retry topic. On a rate-limited send, republishes to the retry topic with a short fixed delay (doesn't count against `maxRetries` - being over budget isn't a real failure). On a genuinely failed send, computes the next backoff via `computeBackoffMs` and republishes with an incremented `attempt` and a `deliverAt` timestamp. The retry-topic consumer holds each message until `deliverAt`, then republishes it onto its *original* priority topic, so it re-enters the normal flow exactly like a fresh message. After `maxRetries` attempts, the worker currently just logs "giving up" - becomes the dead-letter queue in Step 7.
+- `src/services/circuitBreaker.js` — `callWithBreaker(channel, fn, config)` wraps a provider's `send` function with a three-state breaker (`closed` → `open` → `half-open`). Tracks *consecutive* failures per channel; once `failureThreshold` is hit, the breaker trips `open` and every call fails instantly (thrown `CircuitOpenError`) without touching the real provider, for `breakTimeoutMs`. After that cooldown, exactly one `half-open` trial call is allowed through (guarded by an in-flight flag so concurrent messages can't all become trial calls at once) — success resets to `closed`, failure immediately re-trips to `open`. State transitions are logged. Config is in `env.js` (`CIRCUIT_BREAKER_THRESHOLD`, `CIRCUIT_BREAKER_TIMEOUT_MS`).
+- `src/workers/baseWorker.js` — `callWithBreaker` is called once per channel at worker startup (not per message), so the breaker's failure history persists across every message that channel handles, across all three priority consumers. A breaker rejection is caught by the same `try/catch` as a genuine send failure and goes through the identical retry/backoff path - the log line just distinguishes `circuit open` from `send FAILED` so it's clear from the logs whether the real provider was ever touched.
 - **Known gap, by design, to be fixed in Step 7:** a notification that exhausts all retries is just logged and dropped - nothing routes it anywhere inspectable yet.
 
 ## Key design decisions made so far (and why)
@@ -87,6 +89,9 @@ Solid lines/boxes = built and verified. Dashed lines/boxes = designed, not yet i
 - **Retries go through a dedicated per-channel Kafka topic (`notifications.<channel>.retry`) + a scheduler consumer, not an in-process `setTimeout`** — Kafka has no native delayed-delivery, and an in-process timer would lose all pending retries if the worker restarted, and couldn't scale across multiple worker instances. Holding the message on a separate topic until its `deliverAt` time, then republishing onto the original priority topic, survives restarts and keeps retry traffic from clogging the primary topics/partitions.
 - **Full-jitter exponential backoff (`random(0, min(base * 2^attempt, max))`), not fixed or deterministic exponential delay** — without randomness, every failed message retries on the exact same schedule, so a provider outage causes a "thundering herd" where all delayed retries slam the provider again at the same instant. Jitter spreads retries out.
 - **Rate-limited sends retry on a short fixed delay and don't count against `maxRetries`**, separately from genuine send failures — being over budget is expected, self-correcting behavior (the bucket refills in under a second), not a sign of a broken provider, so it shouldn't eat into the same retry budget as actual failures.
+- **The circuit breaker tracks *consecutive* failures, not a rolling failure rate** — simpler to implement and reason about, and still catches the main real-world case (a provider that's fully down). A rolling-window failure rate is more realistic for "degraded but not dead" providers but adds real complexity; noted as a possible future refinement, not built now.
+- **Breaker state lives in-process memory, per worker process, not in Redis** — this worker only ever runs as a single process today, so there's nothing to share. If we ever ran multiple worker instances per channel, each would have its own independent breaker and could disagree about whether the provider is healthy; sharing state via Redis would fix that, at the cost of a round trip per call. Flagged as a known limitation of the current single-instance design, not solved yet.
+- **A breaker rejection throws, rather than returning an error value** — so it flows through the exact same `try/catch` in `makeHandler` that already handles genuine provider failures, with zero changes needed to the retry/backoff logic. The log line is the only place the two cases are told apart.
 
 ## Running it locally
 
@@ -110,4 +115,4 @@ Send the exact same request again and you should get `409 duplicate notification
 
 ## Next up
 
-Circuit breakers for provider failure isolation, then dead-letter queue handling for notifications that exhaust all retries.
+Dead-letter queue handling for notifications that exhaust all retries.
