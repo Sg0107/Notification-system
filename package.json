@@ -10,6 +10,7 @@
     "start:worker:email": "node src/workers/emailWorker.js",
     "start:worker:sms": "node src/workers/smsWorker.js",
     "start:worker:push": "node src/workers/pushWorker.js",
+    "dlq:view": "node scripts/viewDlq.js",
     "test": "echo \"no tests yet\" && exit 0"
   },
   "dependencies": {

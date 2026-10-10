@@ -1,6 +1,6 @@
 const { startConsumer } = require('../kafka/consumer');
 const { connectProducer, publish } = require('../kafka/producer');
-const { topicsFor, retryTopicFor, priorities } = require('../kafka/topics');
+const { topicsFor, retryTopicFor, dlqTopicFor, priorities } = require('../kafka/topics');
 const { tryConsume } = require('../services/rateLimiter');
 const { computeBackoffMs } = require('../utils/backoff');
 const { callWithBreaker, CircuitOpenError } = require('../services/circuitBreaker');
@@ -119,13 +119,21 @@ function makeHandler(channel, send) {
       const reason = err instanceof CircuitOpenError ? 'circuit open' : 'send FAILED';
 
       if (nextAttempt >= retryConfig.maxRetries) {
-        // TEMPORARY for this step: just log "giving up". Step 7 (dead-
-        // letter queue) replaces this with actually recording and
-        // routing the exhausted notification somewhere inspectable.
+        // Out of retries - instead of just dropping the notification,
+        // publish it to the channel's dead-letter topic with enough
+        // context to debug later without needing to cross-reference logs:
+        // the original notification body, how many attempts were actually
+        // made, the final error, and when it was given up on.
         console.error(
-          `[${channel}] ${reason}, max retries (${retryConfig.maxRetries}) exhausted - giving up (priority=${priority})`,
+          `[${channel}] ${reason}, max retries (${retryConfig.maxRetries}) exhausted - sending to DLQ (priority=${priority})`,
           { recipient, error: err.message }
         );
+        await publish(dlqTopicFor(channel), {
+          ...notification,
+          attempts: nextAttempt,
+          finalError: err.message,
+          deadLetteredAt: Date.now(),
+        });
         return;
       }
 

@@ -22,9 +22,17 @@ function retryTopicFor(channel) {
   return `notifications.${channel}.retry`
 }
 
+// Where a notification goes once it has exhausted maxRetries. One per
+// channel, same reasoning as the retry topic - we just need somewhere to
+// land it, not per-priority routing.
+function dlqTopicFor(channel) {
+  return `notifications.${channel}.dlq`
+}
+
 module.exports = {
   channels,
   priorities,
   topicsFor,
   retryTopicFor,
+  dlqTopicFor,
 }

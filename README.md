@@ -41,7 +41,7 @@ flowchart LR
 
     W1 -->|on failure/rate-limit| Retry[notifications.*.retry]
     Retry -->|deliverAt elapsed| T1
-    Retry -. exhausted .-> DLQ[notifications.*.dlq]
+    Retry -->|maxRetries exhausted| DLQ[notifications.*.dlq]
 ```
 
 Solid lines/boxes = built and verified. Dashed lines/boxes = designed, not yet implemented.
@@ -58,7 +58,7 @@ Solid lines/boxes = built and verified. Dashed lines/boxes = designed, not yet i
 | 4 | Delivery workers (email/SMS/push consumers) | ✅ Done |
 | 5 | Retry with exponential backoff | ✅ Done |
 | 6 | Circuit breaker for provider failure isolation | ✅ Done |
-| 7 | Dead-letter queue handling | ⬜ Not started |
+| 7 | Dead-letter queue handling | ✅ Done |
 | 8 | MongoDB persistence (durable notification status) | ⬜ Not started |
 
 ## What's actually implemented right now
@@ -78,7 +78,10 @@ Solid lines/boxes = built and verified. Dashed lines/boxes = designed, not yet i
 - `src/workers/baseWorker.js` — now also a Kafka *producer* (calls `connectProducer()` at startup), and runs a fourth consumer per channel against that channel's retry topic. On a rate-limited send, republishes to the retry topic with a short fixed delay (doesn't count against `maxRetries` - being over budget isn't a real failure). On a genuinely failed send, computes the next backoff via `computeBackoffMs` and republishes with an incremented `attempt` and a `deliverAt` timestamp. The retry-topic consumer holds each message until `deliverAt`, then republishes it onto its *original* priority topic, so it re-enters the normal flow exactly like a fresh message. After `maxRetries` attempts, the worker currently just logs "giving up" - becomes the dead-letter queue in Step 7.
 - `src/services/circuitBreaker.js` — `callWithBreaker(channel, fn, config)` wraps a provider's `send` function with a three-state breaker (`closed` → `open` → `half-open`). Tracks *consecutive* failures per channel; once `failureThreshold` is hit, the breaker trips `open` and every call fails instantly (thrown `CircuitOpenError`) without touching the real provider, for `breakTimeoutMs`. After that cooldown, exactly one `half-open` trial call is allowed through (guarded by an in-flight flag so concurrent messages can't all become trial calls at once) — success resets to `closed`, failure immediately re-trips to `open`. State transitions are logged. Config is in `env.js` (`CIRCUIT_BREAKER_THRESHOLD`, `CIRCUIT_BREAKER_TIMEOUT_MS`).
 - `src/workers/baseWorker.js` — `callWithBreaker` is called once per channel at worker startup (not per message), so the breaker's failure history persists across every message that channel handles, across all three priority consumers. A breaker rejection is caught by the same `try/catch` as a genuine send failure and goes through the identical retry/backoff path - the log line just distinguishes `circuit open` from `send FAILED` so it's clear from the logs whether the real provider was ever touched.
-- **Known gap, by design, to be fixed in Step 7:** a notification that exhausts all retries is just logged and dropped - nothing routes it anywhere inspectable yet.
+- `src/kafka/topics.js` — `dlqTopicFor(channel)`, one dead-letter topic per channel (`notifications.<channel>.dlq`), created alongside the other topics in `scripts/createTopics.js`.
+- `src/workers/baseWorker.js` — once a notification exhausts `maxRetries`, instead of just logging and dropping it, it's published to the channel's DLQ topic with the original notification body plus `attempts` (how many sends were actually tried), `finalError`, and `deadLetteredAt`, so it's debuggable later without cross-referencing logs.
+- `scripts/viewDlq.js` (`npm run dlq:view -- <channel>`) — a one-shot inspector that reads everything currently sitting in a channel's DLQ from the beginning and prints it, then exits after a few seconds of no new messages. Deliberately not a long-running consumer or an auto-processor (no alerting, no "retry from DLQ" admin action yet) - the DLQ today is purely "a place exhausted notifications are visible," checked on demand.
+- **Known gap, by design:** nothing automatically alerts on new DLQ messages, and there's no way to manually retry a dead-lettered notification yet - both reasonable future extensions, intentionally not built now.
 
 ## Key design decisions made so far (and why)
 
@@ -92,6 +95,7 @@ Solid lines/boxes = built and verified. Dashed lines/boxes = designed, not yet i
 - **The circuit breaker tracks *consecutive* failures, not a rolling failure rate** — simpler to implement and reason about, and still catches the main real-world case (a provider that's fully down). A rolling-window failure rate is more realistic for "degraded but not dead" providers but adds real complexity; noted as a possible future refinement, not built now.
 - **Breaker state lives in-process memory, per worker process, not in Redis** — this worker only ever runs as a single process today, so there's nothing to share. If we ever ran multiple worker instances per channel, each would have its own independent breaker and could disagree about whether the provider is healthy; sharing state via Redis would fix that, at the cost of a round trip per call. Flagged as a known limitation of the current single-instance design, not solved yet.
 - **A breaker rejection throws, rather than returning an error value** — so it flows through the exact same `try/catch` in `makeHandler` that already handles genuine provider failures, with zero changes needed to the retry/backoff logic. The log line is the only place the two cases are told apart.
+- **The DLQ is written to, but nothing consumes it automatically** — a dedicated topic per channel keeps dead-lettered notifications durable and inspectable (survives worker restarts, unlike an in-memory list), without us having to build alerting or an admin UI yet. `scripts/viewDlq.js` is a manual, on-demand way to check it; automatic alerting or a retry-from-DLQ action are natural next steps, not built now.
 
 ## Running it locally
 
@@ -115,4 +119,4 @@ Send the exact same request again and you should get `409 duplicate notification
 
 ## Next up
 
-Dead-letter queue handling for notifications that exhaust all retries.
+MongoDB persistence - durable notification status (queued/sent/failed/dead-lettered), queryable independent of what's currently sitting in Kafka.
