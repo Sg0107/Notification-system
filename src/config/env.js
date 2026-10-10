@@ -41,4 +41,15 @@ module.exports = {
     // call through, in ms.
     breakTimeoutMs: Number(process.env.CIRCUIT_BREAKER_TIMEOUT_MS) || 5000,
   },
+  aws: {
+    // AWS_REGION/AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY are also the
+    // standard env var names the AWS SDK itself looks for by default - we
+    // read them explicitly here (rather than letting the SDK find them on
+    // its own) only to keep every config value centralized in this one
+    // file, same as everything else in the project.
+    region: process.env.AWS_REGION,
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    sesFromEmail: process.env.SES_FROM_EMAIL,
+  },
 };

@@ -40,7 +40,7 @@ flowchart LR
     W2 -->|rate limit check| RL
     W3 -->|rate limit check| RL
 
-    W1 -->|circuit breaker| P1[Email Provider mock]
+    W1 -->|circuit breaker| P1[AWS SES - real email]
     W2 -->|circuit breaker| P2[SMS Provider mock]
     W3 -->|circuit breaker| P3[Push Provider mock]
 
@@ -76,7 +76,7 @@ Solid lines/boxes = built and verified. Dashed lines/boxes = designed, not yet i
 - `src/api/routes/notifications.js`, `src/api/server.js` — `POST /api/notifications` validates input, claims the idempotency key, publishes to the right topic, rolls back the claim if publishing fails. Returns `202` (queued), `400` (bad input), `409` (duplicate), or `500`.
 - `src/services/rateLimiter.js` — `tryConsume(channel)`, a token bucket rate limiter per channel. The refill math (elapsed time × rate, capped at capacity) runs entirely inside a Redis Lua script via `EVAL`, so the whole "read bucket state, compute refill, decide, write back" sequence is one atomic operation - verified by `scripts/testRateLimiterRace.js`, which fires 20 concurrent requests at a bucket with capacity 5 and confirms exactly 5 get through.
 - `src/kafka/consumer.js`, `src/workers/baseWorker.js` — generic Kafka consumer wrapper + per-channel worker factory. Each channel runs **three** separate consumers (one per priority), each its own consumer group, each with a different `partitionsConsumedConcurrently` (high=3, normal=2, low=1) - real priority-based concurrency, not just a field on the message.
-- `src/providers/{email,sms,push}Provider.js` — mock providers simulating network latency and a configurable random failure rate, so later steps have real failures to react to. Swappable for real Twilio/SendGrid/FCM calls later without touching worker code.
+- `src/providers/{sms,push}Provider.js` — still mocks, simulating network latency and a configurable random failure rate, so retry/breaker logic has real failures to react to. `src/providers/emailProvider.js` sends real email via AWS SES (see below) - the first provider actually wired up for real.
 - `src/workers/{email,sms,push}Worker.js` — entrypoints, run via `npm run start:worker:<channel>`.
 - `src/utils/backoff.js` — `computeBackoffMs(attempt, baseDelay, maxDelay)`: full-jitter exponential backoff, `random(0, min(baseDelay * 2^attempt, maxDelay))`.
 - `src/kafka/topics.js` — `retryTopicFor(channel)`, one retry topic per channel (`notifications.<channel>.retry`), created alongside the priority topics in `scripts/createTopics.js`.
@@ -108,6 +108,8 @@ Solid lines/boxes = built and verified. Dashed lines/boxes = designed, not yet i
 - **Mongo access goes through a DAO (`src/dao/`), not ad-hoc queries scattered in the route and worker** — the API route and `baseWorker.js` call named functions (`createQueuedNotification`, `markSent`, ...) that describe intent, not raw `collection.updateOne(...)` calls with field names repeated at every call site. This matters specifically because the plan is a future analytics dashboard: when that's built, it can read through the same DAO (or a sibling read-side module), and if the schema or indexing strategy ever changes, there's exactly one file to update, not three.
 - **Every Mongo write is best-effort (logged on failure, never thrown)**, both from the API and the worker — Kafka is the actual source of truth for whether a notification gets delivered; Mongo is a side-channel for visibility and analytics. A Mongo outage should degrade "the dashboard is a bit stale," not break notification delivery or turn a successfully-queued request into a 500.
 - **One row per notification, updated in place, not one row per attempt** — a `retrying` status update overwrites the same document's `attempts`/`lastError` fields rather than inserting a new document per attempt. Keeps the collection's size proportional to notification volume, not retry volume, and makes "what's the current status of X" a single document lookup instead of "find the latest row for X."
+- `src/providers/emailProvider.js` — now calls real AWS SES (`@aws-sdk/client-ses`) instead of simulating one. Kept the exact same `{ send, PROVIDER_NAME }` shape as the mock it replaced, so nothing else in the pipeline (worker, breaker, retry/backoff, DAO) needed to change - this is the entire point of having designed the provider interface as a swappable `sendFn` from the start. Config in `env.js`/`.env.example`: `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `SES_FROM_EMAIL`.
+- **Known gap, by design, deferred for now:** the AWS SES account is still in sandbox mode (can only send to pre-verified recipient addresses; production access requested, pending AWS review) and there's no automated bounce/complaint handling yet (e.g. via SNS feedback) - a bounced or spam-complained address would currently just get retried like any other transient failure rather than being permanently suppressed. Noted as a real gap to address before sending to real, unverified end users at any volume, not built now since this is still a personal/learning-stage project with no live users.
 
 ## Running it locally
 
