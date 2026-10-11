@@ -8,6 +8,7 @@ const {
   releaseIdempotencyKey,
 } = require('../../services/idempotency');
 const { createQueuedNotification } = require('../../dao/notificationDao');
+const logger = require('../../utils/logger');
 
 router.post('/', async (req, res) => {
   const { channel, priority = 'normal', recipient, payload, idempotencyKey } = req.body;
@@ -68,7 +69,7 @@ router.post('/', async (req, res) => {
         payload,
       });
     } catch (storeError) {
-      console.error('Failed to record notification in MongoDB (non-fatal):', storeError.message);
+      logger.error('Failed to record notification in MongoDB (non-fatal):', storeError.message);
     }
 
     res.status(202).json({
@@ -78,7 +79,7 @@ router.post('/', async (req, res) => {
       idempotencyKey: builtIdempotencyKey,
     });
   } catch (error) {
-    console.error('Error queuing notification:', error);
+    logger.error('Error queuing notification:', error);
     res.status(500).json({ error: 'Failed to queue notification' });
   }
 });

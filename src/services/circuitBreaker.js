@@ -1,3 +1,4 @@
+const logger = require('../utils/logger');
 const STATES = {
     CLOSED: 'closed',
     OPEN: 'open',
@@ -28,7 +29,7 @@ function callWithBreaker(channel, fn, { failureThreshold, breakTimeoutMs }) {
 
     function transitionTo(newState) {
         if (newState === state) return;
-        console.warn(`[circuit-breaker:${channel}] ${state} -> ${newState}`);
+        logger.warn(`[circuit-breaker:${channel}] ${state} -> ${newState}`);
         state = newState;
     }
 
