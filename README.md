@@ -131,6 +131,30 @@ curl -i -X POST localhost:3000/api/notifications \
 
 Send the exact same request again and you should get `409 duplicate notification` instead of a second `202`.
 
+## Logging
+
+Everything logs through `src/utils/logger.js`:
+
+```js
+const logger = require('../utils/logger');
+
+logger.info('Notification API listening', { port: 3000 });
+logger.warn('[email] rate limited, scheduling quick retry', { recipient });
+logger.error('Failed to start API:', err);   // an Error adds its message and stack
+```
+
+Methods: `debug`, `info`, `warn`, `error`, `fatal`. The second argument is optional: an object becomes searchable fields, an `Error` adds its message and stack.
+
+Every call prints to the console exactly like `console.log` would, and also sends a copy to [Logbook](https://github.com/Sg0107/mystackdog) when `LOGBOOK_URL` and `LOGBOOK_TOKEN` are set in `.env`. With those empty it is just a console logger.
+
+- **Never in the way:** sending is queued and batched, so logging returns immediately. If Logbook is down the app carries on, and logs are held in memory (up to 2000) and retried. A refused token switches sending off for that process, with one notice.
+- **Source names:** each process names itself after its script: `api`, `email-worker`, `sms-worker`, `push-worker`. Set `LOGBOOK_SOURCE` to override.
+- **Secrets are hidden:** any field named like `password`, `token`, `secret`, `apiKey`, `authorization` or `cookie` is replaced with `[redacted]` before it leaves the process.
+- **Before exiting on purpose,** `await logger.flush()` so the last logs get out. The four entry points do this when startup fails. A crash from an uncaught exception, and Ctrl+C or `SIGTERM`, are flushed automatically.
+- **Recipients:** the worker logs include the `recipient` (an email address or phone number) as a field. Anyone who can view this product in Logbook can see those.
+
+Run the logger's tests with `npm test`.
+
 ## Next up
 
 A final end-to-end pass: run the full system together (API + all three workers), confirm every piece still works in concert, and compare this build against the original v1 version now that every piece has actually been understood, not just generated. Beyond that, the natural follow-ups for the analytics dashboard idea are a read-side API over the `notifications` collection and, eventually, the productization phase (multi-tenant, configurable, sellable) that was explicitly deferred at the start of this rebuild.

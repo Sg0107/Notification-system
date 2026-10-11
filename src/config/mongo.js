@@ -1,5 +1,6 @@
 const { MongoClient } = require('mongodb');
 const { mongoUri } = require('./env');
+const logger = require('../utils/logger');
 
 // Same "one shared client, explicit connect, reused everywhere via
 // require() caching" pattern as kafka/client.js and config/redis.js.
@@ -12,7 +13,7 @@ async function connectMongo() {
     // No db name argument - MongoClient already parsed one out of the
     // connection string (the "/notifications" in mongodb://host:port/notifications).
     db = client.db();
-    console.log('MongoDB connected');
+    logger.info('MongoDB connected');
   }
   return db;
 }

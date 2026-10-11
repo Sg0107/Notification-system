@@ -1,4 +1,5 @@
 const { kafkaClient } = require('./client');
+const logger = require('../utils/logger');
 
 // A Kafka producer needs an explicit connect() call before it can send
 // anything - unlike, say, a typical HTTP client. We create one producer
@@ -11,7 +12,7 @@ async function connectProducer() {
   if (!isConnected) {
     await producer.connect();
     isConnected = true;
-    console.log('Kafka producer connected');
+    logger.info('Kafka producer connected');
   }
 }
 

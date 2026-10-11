@@ -7,6 +7,7 @@ const { callWithBreaker, CircuitOpenError } = require('../services/circuitBreake
 const { connectMongo } = require('../config/mongo');
 const { ensureIndexes, markSent, markAttemptFailed, markDeadLettered } = require('../dao/notificationDao');
 const { retry: retryConfig, circuitBreaker: circuitBreakerConfig } = require('../config/env');
+const logger = require('../utils/logger');
 
 // Every Mongo write from the worker is best-effort: Kafka is the source of
 // truth for whether a notification gets delivered, so a Mongo hiccup should
@@ -16,7 +17,7 @@ async function recordSafely(fn, label) {
   try {
     await fn();
   } catch (err) {
-    console.error(`Failed to update MongoDB (${label}, non-fatal):`, err.message);
+    logger.error(`Failed to update MongoDB (${label}, non-fatal):`, err.message);
   }
 }
 
@@ -78,7 +79,7 @@ async function startWorker({ channel, sendFn }) {
     });
 
     consumers.push(consumer);
-    console.log(`[${channel}] listening on ${topic} (concurrency ${CONCURRENCY_BY_PRIORITY[priority]})`);
+    logger.info(`[${channel}] listening on ${topic} (concurrency ${CONCURRENCY_BY_PRIORITY[priority]})`);
   }
 
   // The retry scheduler: holds a failed/rate-limited message until its
@@ -100,7 +101,7 @@ async function startWorker({ channel, sendFn }) {
     },
   });
   consumers.push(retryConsumer);
-  console.log(`[${channel}] listening on ${retryTopic} (retry scheduler)`);
+  logger.info(`[${channel}] listening on ${retryTopic} (retry scheduler)`);
 
   return consumers;
 }
@@ -119,7 +120,7 @@ function makeHandler(channel, send) {
       // Being over budget isn't a failure - retry quickly on a short
       // fixed delay, and don't touch the attempt count (doesn't count
       // against maxRetries).
-      console.warn(`[${channel}] rate limited, scheduling quick retry (priority=${priority})`, { recipient });
+      logger.warn(`[${channel}] rate limited, scheduling quick retry (priority=${priority})`, { recipient });
       await publish(retryTopicFor(channel), {
         ...notification,
         deliverAt: Date.now() + retryConfig.rateLimitRetryDelayMs,
@@ -129,7 +130,7 @@ function makeHandler(channel, send) {
 
     try {
       const result = await send({ recipient, payload });
-      console.log(`[${channel}] sent OK (priority=${priority}, attempt=${attempt})`, {
+      logger.info(`[${channel}] sent OK (priority=${priority}, attempt=${attempt})`, {
         recipient,
         provider: result.provider,
         messageId: result.messageId,
@@ -150,7 +151,7 @@ function makeHandler(channel, send) {
         // context to debug later without needing to cross-reference logs:
         // the original notification body, how many attempts were actually
         // made, the final error, and when it was given up on.
-        console.error(
+        logger.error(
           `[${channel}] ${reason}, max retries (${retryConfig.maxRetries}) exhausted - sending to DLQ (priority=${priority})`,
           { recipient, error: err.message }
         );
@@ -170,7 +171,7 @@ function makeHandler(channel, send) {
       }
 
       const backoffMs = computeBackoffMs(nextAttempt, retryConfig.baseDelayMs, retryConfig.maxDelayMs);
-      console.error(
+      logger.error(
         `[${channel}] ${reason}, scheduling retry ${nextAttempt}/${retryConfig.maxRetries} in ${backoffMs}ms (priority=${priority})`,
         { recipient, error: err.message }
       );

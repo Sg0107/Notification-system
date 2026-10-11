@@ -11,7 +11,7 @@
     "start:worker:sms": "node src/workers/smsWorker.js",
     "start:worker:push": "node src/workers/pushWorker.js",
     "dlq:view": "node scripts/viewDlq.js",
-    "test": "echo \"no tests yet\" && exit 0"
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-ses": "^3.654.0",

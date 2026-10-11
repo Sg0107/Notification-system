@@ -3,6 +3,7 @@ const { connectProducer } = require('../kafka/producer');
 const { connectMongo } = require('../config/mongo');
 const { ensureIndexes } = require('../dao/notificationDao');
 const notificationsRouter = require('./routes/notifications');
+const logger = require('../utils/logger');
 
 const app = express();
 app.use(express.json());
@@ -23,11 +24,12 @@ async function start() {
 
   const port = 3000;
   app.listen(port, () => {
-    console.log(`Notification API listening on port ${port}`);
+    logger.info(`Notification API listening on port ${port}`);
   });
 }
 
-start().catch((err) => {
-  console.error('Failed to start API:', err);
+start().catch(async (err) => {
+  logger.error('Failed to start API:', err);
+  await logger.flush();
   process.exit(1);
 });
