@@ -91,6 +91,46 @@
   .empty { padding: 24px; text-align: center; color: var(--muted); }
 
   .pagination { display: flex; gap: 8px; align-items: center; margin-top: 12px; justify-content: flex-end; }
+
+  .send-panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 24px;
+  }
+  .send-panel h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); font-weight: 600; }
+  .send-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+  input, textarea {
+    background: #0f1216;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 13px;
+    font-family: inherit;
+  }
+  textarea { resize: vertical; min-height: 36px; }
+  .field.key { grid-column: 1 / -1; }
+  .key-row { display: flex; gap: 6px; }
+  .key-row input { flex: 1; }
+  .send-actions { display: flex; align-items: center; gap: 10px; }
+  .send-actions button[type="submit"] {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #0b1220;
+    font-weight: 600;
+  }
+  .send-feedback { font-size: 13px; }
+  .send-feedback.ok { color: var(--ok); }
+  .send-feedback.err { color: var(--bad); }
 </style>
 </head>
 <body>
@@ -99,6 +139,57 @@
 
   <div class="cards" id="cards"></div>
   <div class="channel-breakdown" id="channelBreakdown"></div>
+
+  <div class="send-panel">
+    <h2>Send a notification</h2>
+    <form id="sendForm">
+      <div class="send-grid">
+        <div class="field">
+          <label for="sendChannel">Channel</label>
+          <select id="sendChannel">
+            <option value="email">Email</option>
+            <option value="sms">SMS</option>
+            <option value="push">Push</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="sendPriority">Priority</label>
+          <select id="sendPriority">
+            <option value="high">High</option>
+            <option value="normal" selected>Normal</option>
+            <option value="low">Low</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="sendRecipient" id="sendRecipientLabel">Recipient (email address)</label>
+          <input id="sendRecipient" type="text" placeholder="someone@example.com" />
+        </div>
+        <div class="field" id="sendSubjectField">
+          <label for="sendSubject">Subject</label>
+          <input id="sendSubject" type="text" placeholder="(no subject)" />
+        </div>
+      </div>
+      <div class="send-grid">
+        <div class="field" style="grid-column: 1 / -1;">
+          <label for="sendBody">Message</label>
+          <textarea id="sendBody" placeholder="Notification body..."></textarea>
+        </div>
+      </div>
+      <div class="send-grid">
+        <div class="field key">
+          <label for="sendKey">Idempotency key</label>
+          <div class="key-row">
+            <input id="sendKey" type="text" />
+            <button type="button" id="regenKeyBtn">Regenerate</button>
+          </div>
+        </div>
+      </div>
+      <div class="send-actions">
+        <button type="submit">Send notification</button>
+        <span class="send-feedback" id="sendFeedback"></span>
+      </div>
+    </form>
+  </div>
 
   <div class="controls">
     <select id="channelFilter">
@@ -246,6 +337,110 @@
   document.getElementById('refreshBtn').addEventListener('click', loadAll);
   channelFilter.addEventListener('change', () => { skip = 0; loadTable(); });
   statusFilter.addEventListener('change', () => { skip = 0; loadTable(); });
+
+  // --- Send notification form -----------------------------------------
+  // Posts straight to the same POST /api/notifications the real API
+  // clients use - no special "admin" endpoint, this is just a form in
+  // front of the public API, so it exercises the exact same idempotency/
+  // validation path everything else goes through.
+
+  const sendChannel = document.getElementById('sendChannel');
+  const sendRecipient = document.getElementById('sendRecipient');
+  const sendRecipientLabel = document.getElementById('sendRecipientLabel');
+  const sendSubjectField = document.getElementById('sendSubjectField');
+  const sendKey = document.getElementById('sendKey');
+  const sendFeedback = document.getElementById('sendFeedback');
+
+  const RECIPIENT_HINTS = {
+    email: { label: 'Recipient (email address)', placeholder: 'someone@example.com' },
+    sms: { label: 'Recipient (phone number)', placeholder: '+15551234567' },
+    push: { label: 'Recipient (device token)', placeholder: 'device-token-abc123' },
+  };
+
+  function newIdempotencyKey() {
+    const rand = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    return `dashboard-${rand}`;
+  }
+
+  function applyChannelFields() {
+    const hint = RECIPIENT_HINTS[sendChannel.value];
+    sendRecipientLabel.textContent = hint.label;
+    sendRecipient.placeholder = hint.placeholder;
+    // Subject only makes sense for email - sms/push providers never read it.
+    sendSubjectField.style.display = sendChannel.value === 'email' ? '' : 'none';
+  }
+
+  sendChannel.addEventListener('change', applyChannelFields);
+  document.getElementById('regenKeyBtn').addEventListener('click', () => {
+    sendKey.value = newIdempotencyKey();
+  });
+
+  document.getElementById('sendForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    sendFeedback.textContent = '';
+    sendFeedback.className = 'send-feedback';
+
+    const channel = sendChannel.value;
+    const recipient = sendRecipient.value.trim();
+    const body = document.getElementById('sendBody').value;
+    const subject = document.getElementById('sendSubject').value;
+    const idempotencyKey = sendKey.value.trim() || newIdempotencyKey();
+
+    if (!recipient) {
+      sendFeedback.textContent = 'Recipient is required.';
+      sendFeedback.className = 'send-feedback err';
+      return;
+    }
+
+    // Shape the payload the way each channel's provider actually reads it
+    // (emailProvider wants subject/body, sms/pushProvider just read body,
+    // pushProvider also reads title - reuse subject as a stand-in there).
+    const payload = channel === 'email'
+      ? { subject: subject || '(no subject)', body }
+      : channel === 'push'
+        ? { title: subject || undefined, body }
+        : { body };
+
+    const submitBtn = e.target.querySelector('button[type="submit"]');
+    submitBtn.disabled = true;
+
+    try {
+      const res = await fetch('/api/notifications', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel,
+          priority: document.getElementById('sendPriority').value,
+          recipient,
+          payload,
+          idempotencyKey,
+        }),
+      });
+      const json = await res.json().catch(() => ({}));
+
+      if (res.status === 202) {
+        sendFeedback.textContent = `Queued (${json.idempotencyKey}).`;
+        sendFeedback.className = 'send-feedback ok';
+        sendKey.value = newIdempotencyKey(); // ready for the next send
+        skip = 0;
+        loadAll();
+      } else if (res.status === 409) {
+        sendFeedback.textContent = 'Duplicate - that idempotency key was already used.';
+        sendFeedback.className = 'send-feedback err';
+      } else {
+        sendFeedback.textContent = json.error || `Request failed (HTTP ${res.status}).`;
+        sendFeedback.className = 'send-feedback err';
+      }
+    } catch (err) {
+      sendFeedback.textContent = `Request error: ${err.message}`;
+      sendFeedback.className = 'send-feedback err';
+    } finally {
+      submitBtn.disabled = false;
+    }
+  });
+
+  applyChannelFields();
+  sendKey.value = newIdempotencyKey();
 
   loadAll();
   autoRefreshTimer = setInterval(loadAll, 5000);
