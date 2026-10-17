@@ -115,6 +115,11 @@ function makeHandler(channel, send) {
   return async function handleNotification(notification) {
     const { recipient, payload, priority, attempt = 0, idempotencyKey } = notification;
 
+    logger.info(`[${channel}] processing notification (priority=${priority}, attempt=${attempt})`, {
+      recipient,
+      idempotencyKey,
+    });
+
     const allowed = await tryConsume(channel);
     if (!allowed) {
       // Being over budget isn't a failure - retry quickly on a short
