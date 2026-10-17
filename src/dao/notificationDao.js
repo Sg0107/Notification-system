@@ -20,6 +20,13 @@ async function ensureIndexes() {
   const collection = getDb().collection(COLLECTION);
   await collection.createIndex({ idempotencyKey: 1 }, { unique: true });
   await collection.createIndex({ channel: 1, status: 1, createdAt: 1 });
+
+  // `active` is the dashboard's "show this" flag: every read query below
+  // only returns active: true documents, so the dashboard can be cleared
+  // by flipping documents to active: false by hand, without deleting them.
+  // Nothing in the code ever sets it to false. Documents written before the
+  // field existed get it here (a no-op once every document has it).
+  await collection.updateMany({ active: { $exists: false } }, { $set: { active: true } });
 }
 
 // Called once, from the API, BEFORE the notification is published to Kafka.
@@ -52,7 +59,9 @@ async function createQueuedNotification({ idempotencyKey, channel, priority, rec
         sentAt: null,
         deadLetteredAt: null,
       },
-      $setOnInsert: { idempotencyKey, createdAt: now },
+      // active is only set when the document is first created, so a
+      // document someone switched off by hand stays off if it's reset here.
+      $setOnInsert: { idempotencyKey, createdAt: now, active: true },
     },
     { upsert: true }
   );
@@ -131,7 +140,7 @@ async function markDeadLettered(idempotencyKey, { attempts, finalError }) {
 // status. Returns both the page of documents and the total matching count,
 // so the UI can render "showing 1-20 of 143" and page controls.
 async function listNotifications({ channel, status, limit = 20, skip = 0 } = {}) {
-  const filter = {};
+  const filter = { active: true };
   if (channel) filter.channel = channel;
   if (status) filter.status = status;
 
@@ -159,6 +168,7 @@ async function getStats() {
 
   const [result] = await collection
     .aggregate([
+      { $match: { active: true } },
       {
         $facet: {
           byStatus: [{ $group: { _id: '$status', count: { $sum: 1 } } }],
