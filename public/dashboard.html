@@ -118,9 +118,12 @@
     font-family: inherit;
   }
   textarea { resize: vertical; min-height: 36px; }
-  .field.key { grid-column: 1 / -1; }
-  .key-row { display: flex; gap: 6px; }
-  .key-row input { flex: 1; }
+  .channel-checks { display: flex; gap: 16px; align-items: center; }
+  .channel-checks label { display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; text-transform: none; }
+  .channel-checks input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; }
+  .recipient-field { display: none; }
+  .recipient-field.active { display: flex; }
+  .field .hint { font-size: 11px; color: var(--muted); font-weight: normal; text-transform: none; letter-spacing: normal; }
   .send-actions { display: flex; align-items: center; gap: 10px; }
   .send-actions button[type="submit"] {
     background: var(--accent);
@@ -145,12 +148,12 @@
     <form id="sendForm">
       <div class="send-grid">
         <div class="field">
-          <label for="sendChannel">Channel</label>
-          <select id="sendChannel">
-            <option value="email">Email</option>
-            <option value="sms">SMS</option>
-            <option value="push">Push</option>
-          </select>
+          <label>Channels</label>
+          <div class="channel-checks">
+            <label><input type="checkbox" class="channel-check" value="email" checked /> Email</label>
+            <label><input type="checkbox" class="channel-check" value="sms" /> SMS</label>
+            <label><input type="checkbox" class="channel-check" value="push" /> Push</label>
+          </div>
         </div>
         <div class="field">
           <label for="sendPriority">Priority</label>
@@ -160,12 +163,24 @@
             <option value="low">Low</option>
           </select>
         </div>
-        <div class="field">
-          <label for="sendRecipient" id="sendRecipientLabel">Recipient (email address)</label>
-          <input id="sendRecipient" type="text" placeholder="someone@example.com" />
+      </div>
+      <div class="send-grid">
+        <div class="field recipient-field" id="emailRecipientField">
+          <label for="emailRecipients">Email address(es) <span class="hint">- comma or newline separated</span></label>
+          <textarea id="emailRecipients" placeholder="a@example.com, b@example.com"></textarea>
         </div>
-        <div class="field" id="sendSubjectField">
-          <label for="sendSubject">Subject</label>
+        <div class="field recipient-field" id="smsRecipientField">
+          <label for="smsRecipients">Phone number(s) <span class="hint">- comma or newline separated</span></label>
+          <textarea id="smsRecipients" placeholder="+15551234567, +15557654321"></textarea>
+        </div>
+        <div class="field recipient-field" id="pushRecipientField">
+          <label for="pushRecipients">Device token(s) <span class="hint">- comma or newline separated</span></label>
+          <textarea id="pushRecipients" placeholder="device-token-abc, device-token-def"></textarea>
+        </div>
+      </div>
+      <div class="send-grid">
+        <div class="field">
+          <label for="sendSubject">Subject <span class="hint">- used as the email subject, or as a headline prefixed onto the SMS body</span></label>
           <input id="sendSubject" type="text" placeholder="(no subject)" />
         </div>
       </div>
@@ -173,15 +188,6 @@
         <div class="field" style="grid-column: 1 / -1;">
           <label for="sendBody">Message</label>
           <textarea id="sendBody" placeholder="Notification body..."></textarea>
-        </div>
-      </div>
-      <div class="send-grid">
-        <div class="field key">
-          <label for="sendKey">Idempotency key</label>
-          <div class="key-row">
-            <input id="sendKey" type="text" />
-            <button type="button" id="regenKeyBtn">Regenerate</button>
-          </div>
         </div>
       </div>
       <div class="send-actions">
@@ -343,18 +349,27 @@
   // clients use - no special "admin" endpoint, this is just a form in
   // front of the public API, so it exercises the exact same idempotency/
   // validation path everything else goes through.
+  //
+  // Channels are multi-select (checkboxes) and each channel's recipient
+  // field accepts multiple comma/newline-separated values, so one submit
+  // can fan out into several real notifications - e.g. email to 3
+  // addresses AND sms to 2 numbers at once. Each of those is a genuinely
+  // separate notification (its own recipient, its own eventual
+  // sent/failed outcome), so each needs its OWN idempotency key - that
+  // key is generated fresh per request, right before it's sent, and is
+  // never shown or editable in the UI. There's nothing for the user to
+  // manage: a key only exists to let the API tell "retry of the same
+  // thing" apart from "a new thing that happens to look the same," and a
+  // key typed into a form and reused across submits would silently turn
+  // every later send into a rejected duplicate.
 
-  const sendChannel = document.getElementById('sendChannel');
-  const sendRecipient = document.getElementById('sendRecipient');
-  const sendRecipientLabel = document.getElementById('sendRecipientLabel');
-  const sendSubjectField = document.getElementById('sendSubjectField');
-  const sendKey = document.getElementById('sendKey');
   const sendFeedback = document.getElementById('sendFeedback');
+  const channelChecks = Array.from(document.querySelectorAll('.channel-check'));
 
-  const RECIPIENT_HINTS = {
-    email: { label: 'Recipient (email address)', placeholder: 'someone@example.com' },
-    sms: { label: 'Recipient (phone number)', placeholder: '+15551234567' },
-    push: { label: 'Recipient (device token)', placeholder: 'device-token-abc123' },
+  const CHANNEL_CONFIG = {
+    email: { fieldId: 'emailRecipientField', inputId: 'emailRecipients' },
+    sms: { fieldId: 'smsRecipientField', inputId: 'smsRecipients' },
+    push: { fieldId: 'pushRecipientField', inputId: 'pushRecipients' },
   };
 
   function newIdempotencyKey() {
@@ -362,85 +377,104 @@
     return `dashboard-${rand}`;
   }
 
-  function applyChannelFields() {
-    const hint = RECIPIENT_HINTS[sendChannel.value];
-    sendRecipientLabel.textContent = hint.label;
-    sendRecipient.placeholder = hint.placeholder;
-    // Subject only makes sense for email - sms/push providers never read it.
-    sendSubjectField.style.display = sendChannel.value === 'email' ? '' : 'none';
+  // Splits on commas AND newlines, trims each piece, drops empties - so
+  // "a@x.com, b@x.com" and one-per-line both work.
+  function parseRecipients(raw) {
+    return raw.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
   }
 
-  sendChannel.addEventListener('change', applyChannelFields);
-  document.getElementById('regenKeyBtn').addEventListener('click', () => {
-    sendKey.value = newIdempotencyKey();
-  });
+  function applyChannelFields() {
+    for (const check of channelChecks) {
+      const cfg = CHANNEL_CONFIG[check.value];
+      document.getElementById(cfg.fieldId).classList.toggle('active', check.checked);
+    }
+  }
+
+  // Shapes the payload the way each channel's provider actually reads it.
+  // emailProvider reads subject/body directly. smsProvider only reads
+  // body - there's no separate subject slot on an SMS, so "subject" is
+  // folded in as a headline line on top of the body instead. pushProvider
+  // reads title/body, so subject maps onto title there.
+  function buildPayload(channel, subject, body) {
+    if (channel === 'email') return { subject: subject || '(no subject)', body };
+    if (channel === 'push') return { title: subject || undefined, body };
+    // sms
+    return { body: subject ? `${subject}\n${body}` : body };
+  }
+
+  async function sendOne(channel, recipient, priority, subject, body) {
+    const idempotencyKey = newIdempotencyKey();
+    const res = await fetch('/api/notifications', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        channel,
+        priority,
+        recipient,
+        payload: buildPayload(channel, subject, body),
+        idempotencyKey,
+      }),
+    });
+    return { channel, recipient, status: res.status };
+  }
+
+  channelChecks.forEach((c) => c.addEventListener('change', applyChannelFields));
 
   document.getElementById('sendForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     sendFeedback.textContent = '';
     sendFeedback.className = 'send-feedback';
 
-    const channel = sendChannel.value;
-    const recipient = sendRecipient.value.trim();
-    const body = document.getElementById('sendBody').value;
+    const selectedChannels = channelChecks.filter((c) => c.checked).map((c) => c.value);
+    const priority = document.getElementById('sendPriority').value;
     const subject = document.getElementById('sendSubject').value;
-    const idempotencyKey = sendKey.value.trim() || newIdempotencyKey();
+    const body = document.getElementById('sendBody').value;
 
-    if (!recipient) {
-      sendFeedback.textContent = 'Recipient is required.';
+    if (selectedChannels.length === 0) {
+      sendFeedback.textContent = 'Select at least one channel.';
       sendFeedback.className = 'send-feedback err';
       return;
     }
 
-    // Shape the payload the way each channel's provider actually reads it
-    // (emailProvider wants subject/body, sms/pushProvider just read body,
-    // pushProvider also reads title - reuse subject as a stand-in there).
-    const payload = channel === 'email'
-      ? { subject: subject || '(no subject)', body }
-      : channel === 'push'
-        ? { title: subject || undefined, body }
-        : { body };
+    // One (channel, recipient) pair per actual notification to send.
+    const tasks = [];
+    for (const channel of selectedChannels) {
+      const recipients = parseRecipients(document.getElementById(CHANNEL_CONFIG[channel].inputId).value);
+      if (recipients.length === 0) {
+        sendFeedback.textContent = `${channel} is selected but has no recipients.`;
+        sendFeedback.className = 'send-feedback err';
+        return;
+      }
+      for (const recipient of recipients) tasks.push({ channel, recipient });
+    }
 
     const submitBtn = e.target.querySelector('button[type="submit"]');
     submitBtn.disabled = true;
 
     try {
-      const res = await fetch('/api/notifications', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          channel,
-          priority: document.getElementById('sendPriority').value,
-          recipient,
-          payload,
-          idempotencyKey,
-        }),
-      });
-      const json = await res.json().catch(() => ({}));
+      const results = await Promise.allSettled(
+        tasks.map((t) => sendOne(t.channel, t.recipient, priority, subject, body))
+      );
 
-      if (res.status === 202) {
-        sendFeedback.textContent = `Queued (${json.idempotencyKey}).`;
+      const queued = results.filter((r) => r.status === 'fulfilled' && r.value.status === 202).length;
+      const failed = results.length - queued;
+
+      if (failed === 0) {
+        sendFeedback.textContent = `Queued ${queued} notification${queued === 1 ? '' : 's'}.`;
         sendFeedback.className = 'send-feedback ok';
-        sendKey.value = newIdempotencyKey(); // ready for the next send
-        skip = 0;
-        loadAll();
-      } else if (res.status === 409) {
-        sendFeedback.textContent = 'Duplicate - that idempotency key was already used.';
-        sendFeedback.className = 'send-feedback err';
       } else {
-        sendFeedback.textContent = json.error || `Request failed (HTTP ${res.status}).`;
+        sendFeedback.textContent = `Queued ${queued}, ${failed} failed - check the worker/API logs for details.`;
         sendFeedback.className = 'send-feedback err';
       }
-    } catch (err) {
-      sendFeedback.textContent = `Request error: ${err.message}`;
-      sendFeedback.className = 'send-feedback err';
+
+      skip = 0;
+      loadAll();
     } finally {
       submitBtn.disabled = false;
     }
   });
 
   applyChannelFields();
-  sendKey.value = newIdempotencyKey();
 
   loadAll();
   autoRefreshTimer = setInterval(loadAll, 5000);
