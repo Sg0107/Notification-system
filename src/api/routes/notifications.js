@@ -6,7 +6,7 @@ const {
   claimIdempotencyKey,
   releaseIdempotencyKey,
 } = require('../../services/idempotency');
-const { createQueuedNotification } = require('../../dao/notificationDao');
+const { createQueuedNotification, markPublishFailed } = require('../../dao/notificationDao');
 const logger = require('../../utils/logger');
 
 router.post('/', async (req, res) => {
@@ -57,24 +57,12 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // Inner try/catch: covers publish() failing *after* we've already
-    // claimed the key. Here we DO need to roll back, so a legitimate
-    // retry with the same idempotency key isn't wrongly blocked for the
-    // rest of the TTL window.
-    try {
-      // idempotencyKey now rides along in the message body - the worker
-      // needs it to find this same notification's Mongo document later
-      // and update it (markSent/markAttemptFailed/markDeadLettered).
-      await publish(topic, { channel, priority, recipient, payload, idempotencyKey });
-    } catch (publishError) {
-      await releaseIdempotencyKey(idempotencyKey);
-      throw publishError;
-    }
-
-    // Best-effort: record this notification for the dashboard. Kafka is
-    // already the source of truth for delivery at this point (the message
-    // is published), so a Mongo hiccup here shouldn't fail a request that
-    // has, in fact, been successfully queued.
+    // Record the notification BEFORE publishing. A worker can pick up the
+    // message and call markSent within milliseconds of publish(), and that
+    // update needs the document to already exist. Best-effort: if Mongo is
+    // down the notification is still delivered, it just won't appear on the
+    // dashboard, so this is logged, not thrown.
+    let recorded = true;
     try {
       await createQueuedNotification({
         idempotencyKey,
@@ -84,7 +72,30 @@ router.post('/', async (req, res) => {
         payload,
       });
     } catch (storeError) {
+      recorded = false;
       logger.error('Failed to record notification in MongoDB (non-fatal):', storeError.message);
+    }
+
+    // Inner try/catch: covers publish() failing *after* we've already
+    // claimed the key. Here we DO need to roll back, so a legitimate
+    // retry with the same idempotency key isn't wrongly blocked for the
+    // rest of the TTL window - and the document created above is marked
+    // "failed" (not deleted) since nothing will ever process it.
+    try {
+      // idempotencyKey rides along in the message body - the worker
+      // needs it to find this same notification's Mongo document later
+      // and update it (markSent/markAttemptFailed/markDeadLettered).
+      await publish(topic, { channel, priority, recipient, payload, idempotencyKey });
+    } catch (publishError) {
+      await releaseIdempotencyKey(idempotencyKey);
+      if (recorded) {
+        try {
+          await markPublishFailed(idempotencyKey, { error: publishError.message });
+        } catch (markError) {
+          logger.error('Failed to mark notification as failed in MongoDB (non-fatal):', markError.message);
+        }
+      }
+      throw publishError;
     }
 
     logger.info('Notification queued', { channel, priority, recipient, idempotencyKey, topic });

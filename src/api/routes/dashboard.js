@@ -5,7 +5,7 @@ const { channels } = require('../../kafka/topics');
 const logger = require('../../utils/logger');
 
 // The statuses notificationDao actually writes.
-const STATUSES = ['queued', 'retrying', 'sent', 'dead_lettered'];
+const STATUSES = ['queued', 'retrying', 'sent', 'dead_lettered', 'failed'];
 
 // GET /api/dashboard/stats - the summary numbers: total count, counts per
 // status, and counts per channel+status. Cheap enough to call on every

@@ -44,6 +44,7 @@
   .card.sent .value { color: var(--ok); }
   .card.retrying .value { color: var(--warn); }
   .card.dead_lettered .value { color: var(--bad); }
+  .card.failed .value { color: var(--bad); }
 
   .channel-breakdown {
     background: var(--panel);
@@ -62,6 +63,7 @@
   .pill.sent { color: var(--ok); }
   .pill.retrying { color: var(--warn); }
   .pill.dead_lettered { color: var(--bad); }
+  .pill.failed { color: var(--bad); }
   .pill.queued { color: var(--accent); }
 
   .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
@@ -86,6 +88,7 @@
   .status-badge.sent { color: var(--ok); }
   .status-badge.retrying { color: var(--warn); }
   .status-badge.dead_lettered { color: var(--bad); }
+  .status-badge.failed { color: var(--bad); }
   .status-badge.queued { color: var(--accent); }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); }
   .empty { padding: 24px; text-align: center; color: var(--muted); }
@@ -210,6 +213,7 @@
       <option value="retrying">Retrying</option>
       <option value="sent">Sent</option>
       <option value="dead_lettered">Dead lettered</option>
+      <option value="failed">Failed</option>
     </select>
     <div class="spacer"></div>
     <span class="meta" id="rangeLabel"></span>
@@ -262,7 +266,7 @@
     const res = await fetch('/api/dashboard/stats');
     const stats = await res.json();
 
-    const statuses = ['queued', 'retrying', 'sent', 'dead_lettered'];
+    const statuses = ['queued', 'retrying', 'sent', 'dead_lettered', 'failed'];
     const cardsEl = document.getElementById('cards');
     cardsEl.innerHTML = `
       <div class="card">

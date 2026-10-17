@@ -22,27 +22,51 @@ async function ensureIndexes() {
   await collection.createIndex({ channel: 1, status: 1, createdAt: 1 });
 }
 
-// Called once, from the API, right after a notification is successfully
-// published to Kafka. This is the document's birth - everything after this
-// is an update keyed by idempotencyKey, not a new insert.
+// Called once, from the API, BEFORE the notification is published to Kafka.
+// This is the document's birth - everything after this is an update keyed by
+// idempotencyKey, not a new insert. It has to exist first: a fast worker can
+// finish and call markSent before the API's next line runs, and an update
+// against a document that doesn't exist yet matches nothing, leaving the
+// notification stuck as "queued" forever.
+//
+// It is an upsert, not a plain insert, so a caller retrying after a failed
+// publish (the idempotency key is released then, and the document is left
+// behind as "failed") gets its document reset to "queued" instead of
+// hitting the unique index.
 async function createQueuedNotification({ idempotencyKey, channel, priority, recipient, payload }) {
   const now = new Date();
-  await getDb().collection(COLLECTION).insertOne({
-    idempotencyKey,
-    channel,
-    priority,
-    recipient,
-    payload,
-    status: 'queued',
-    attempts: 0,
-    lastError: null,
-    provider: null,
-    messageId: null,
-    createdAt: now,
-    updatedAt: now,
-    sentAt: null,
-    deadLetteredAt: null,
-  });
+  await getDb().collection(COLLECTION).updateOne(
+    { idempotencyKey },
+    {
+      $set: {
+        channel,
+        priority,
+        recipient,
+        payload,
+        status: 'queued',
+        attempts: 0,
+        lastError: null,
+        provider: null,
+        messageId: null,
+        updatedAt: now,
+        sentAt: null,
+        deadLetteredAt: null,
+      },
+      $setOnInsert: { idempotencyKey, createdAt: now },
+    },
+    { upsert: true }
+  );
+}
+
+// Called from the API when publishing to Kafka fails after the document was
+// created. The notification never reached the queue, so no worker will ever
+// update it - mark it failed (never delete it) so the dashboard shows what
+// happened instead of a notification stuck as "queued".
+async function markPublishFailed(idempotencyKey, { error }) {
+  await getDb().collection(COLLECTION).updateOne(
+    { idempotencyKey },
+    { $set: { status: 'failed', lastError: error, updatedAt: new Date() } }
+  );
 }
 
 // Called from the worker on every failed send that's going to be retried
@@ -167,6 +191,7 @@ async function getStats() {
 module.exports = {
   ensureIndexes,
   createQueuedNotification,
+  markPublishFailed,
   markAttemptFailed,
   markSent,
   markDeadLettered,
