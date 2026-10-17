@@ -11,6 +11,11 @@
     "start:worker:sms": "node src/workers/smsWorker.js",
     "start:worker:push": "node src/workers/pushWorker.js",
     "dlq:view": "node scripts/viewDlq.js",
+    "dev:api": "nodemon src/api/server.js",
+    "dev:worker:email": "nodemon src/workers/emailWorker.js",
+    "dev:worker:sms": "nodemon src/workers/smsWorker.js",
+    "dev:worker:push": "nodemon src/workers/pushWorker.js",
+    "dev": "concurrently -n api,email,sms,push -c blue,green,yellow,magenta \"npm:dev:api\" \"npm:dev:worker:email\" \"npm:dev:worker:sms\" \"npm:dev:worker:push\"",
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
@@ -21,7 +26,10 @@
     "kafkajs": "^2.2.4",
     "mongodb": "^6.9.0"
   },
-  "devDependencies": {},
+  "devDependencies": {
+    "concurrently": "^9.2.5",
+    "nodemon": "^3.1.7"
+  },
   "engines": {
     "node": ">=18"
   }
