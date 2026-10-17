@@ -13,7 +13,7 @@ A naive "call the email/SMS provider directly from the request handler" approach
 ```mermaid
 flowchart LR
     Client -->|POST /api/notifications| API[Express API]
-    API -->|1. build idempotency key| Idem[(Redis:\nidempotency keys)]
+    API -->|1. claim idempotency key| Idem[(Redis:\nidempotency keys)]
     API -->|2. claim key atomically| Idem
     API -->|3. publish message| Kafka{{Kafka}}
 
@@ -72,8 +72,8 @@ Solid lines/boxes = built and verified. Dashed lines/boxes = designed, not yet i
 - `src/kafka/topics.js` — topic naming: `notifications.<channel>.<priority>`, channels = `email|sms|push`, priorities = `low|normal|high`.
 - `src/kafka/client.js`, `src/kafka/producer.js` — Kafka connection + a minimal `publish(topic, message)` helper.
 - `src/config/env.js`, `src/config/redis.js` — centralized env config, shared Redis client.
-- `src/services/idempotency.js` — `buildIdempotencyKey` (caller-supplied key or a derived SHA-256 hash of channel+recipient+payload), `claimIdempotencyKey` (atomic Redis `SET ... NX EX`), `releaseIdempotencyKey` (rollback on publish failure).
-- `src/api/routes/notifications.js`, `src/api/server.js` — `POST /api/notifications` validates input, claims the idempotency key, publishes to the right topic, rolls back the claim if publishing fails. Returns `202` (queued), `400` (bad input), `409` (duplicate), or `500`.
+- `src/services/idempotency.js` — the idempotency key is always supplied by the caller (the backend never derives one), `claimIdempotencyKey` (atomic Redis `SET ... NX EX`), `releaseIdempotencyKey` (rollback on publish failure).
+- `src/api/routes/notifications.js`, `src/api/server.js` — `POST /api/notifications` validates input (including a required, caller-supplied `idempotencyKey`), claims the idempotency key, publishes to the right topic, rolls back the claim if publishing fails. Returns `202` (queued), `400` (bad input), `409` (duplicate), or `500`.
 - `src/services/rateLimiter.js` — `tryConsume(channel)`, a token bucket rate limiter per channel. The refill math (elapsed time × rate, capped at capacity) runs entirely inside a Redis Lua script via `EVAL`, so the whole "read bucket state, compute refill, decide, write back" sequence is one atomic operation - verified by `scripts/testRateLimiterRace.js`, which fires 20 concurrent requests at a bucket with capacity 5 and confirms exactly 5 get through.
 - `src/kafka/consumer.js`, `src/workers/baseWorker.js` — generic Kafka consumer wrapper + per-channel worker factory. Each channel runs **three** separate consumers (one per priority), each its own consumer group, each with a different `partitionsConsumedConcurrently` (high=3, normal=2, low=1) - real priority-based concurrency, not just a field on the message.
 - `src/providers/{sms,push}Provider.js` — still mocks, simulating network latency and a configurable random failure rate, so retry/breaker logic has real failures to react to. `src/providers/emailProvider.js` sends real email via AWS SES (see below) - the first provider actually wired up for real.

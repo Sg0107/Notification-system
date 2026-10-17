@@ -99,10 +99,77 @@ async function markDeadLettered(idempotencyKey, { attempts, finalError }) {
   );
 }
 
+// Read-side queries for the dashboard. Nothing here writes - these just
+// shape the same documents the functions above produce into what a
+// dashboard actually wants to show.
+
+// Paginated, newest-first list, optionally filtered by channel and/or
+// status. Returns both the page of documents and the total matching count,
+// so the UI can render "showing 1-20 of 143" and page controls.
+async function listNotifications({ channel, status, limit = 20, skip = 0 } = {}) {
+  const filter = {};
+  if (channel) filter.channel = channel;
+  if (status) filter.status = status;
+
+  const collection = getDb().collection(COLLECTION);
+  const [items, total] = await Promise.all([
+    collection
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .toArray(),
+    collection.countDocuments(filter),
+  ]);
+
+  return { items, total };
+}
+
+// Overall counts, sliced two ways: by status alone (for the summary cards -
+// "12 queued, 340 sent, 3 dead-lettered") and by channel+status together
+// (for a breakdown table - "email: 200 sent, 2 dead-lettered"). One
+// aggregation pipeline with $facet runs both slices in a single round trip
+// to Mongo instead of two separate queries.
+async function getStats() {
+  const collection = getDb().collection(COLLECTION);
+
+  const [result] = await collection
+    .aggregate([
+      {
+        $facet: {
+          byStatus: [{ $group: { _id: '$status', count: { $sum: 1 } } }],
+          byChannelAndStatus: [
+            { $group: { _id: { channel: '$channel', status: '$status' }, count: { $sum: 1 } } },
+          ],
+          total: [{ $count: 'count' }],
+        },
+      },
+    ])
+    .toArray();
+
+  const byStatus = {};
+  for (const row of result.byStatus) byStatus[row._id] = row.count;
+
+  const byChannel = {};
+  for (const row of result.byChannelAndStatus) {
+    const { channel, status } = row._id;
+    if (!byChannel[channel]) byChannel[channel] = {};
+    byChannel[channel][status] = row.count;
+  }
+
+  return {
+    total: result.total[0]?.count || 0,
+    byStatus,
+    byChannel,
+  };
+}
+
 module.exports = {
   ensureIndexes,
   createQueuedNotification,
   markAttemptFailed,
   markSent,
   markDeadLettered,
+  listNotifications,
+  getStats,
 };
