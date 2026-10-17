@@ -52,4 +52,12 @@ module.exports = {
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
     sesFromEmail: process.env.SES_FROM_EMAIL,
   },
+  // Safety gate, defaults closed: real SES sends only happen when this is
+  // explicitly "true" in .env. Everything else about the pipeline (Kafka,
+  // rate limiting, retry, circuit breaker, Mongo) behaves identically
+  // either way - this only decides whether emailProvider.js makes the
+  // real AWS call or returns a fast mocked success, which is what makes
+  // it safe to fire load-test volume without burning into the SES quota
+  // or actually emailing anyone.
+  sendRealEmails: process.env.SEND_REAL_EMAILS === 'true',
 };
